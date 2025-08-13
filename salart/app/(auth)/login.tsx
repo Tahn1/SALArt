@@ -1,5 +1,5 @@
 import { Link, router } from "expo-router";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
@@ -10,7 +10,9 @@ import {
   TextInput,
   View,
 } from "react-native";
+import * as SecureStore from "expo-secure-store";
 import { supabase } from "../../lib/supabase";
+import { hasOnboarded } from "../../lib/onboarding";
 
 const colors = {
   bg: "#121212",
@@ -23,11 +25,32 @@ const colors = {
   border: "#2F2F2F",
 };
 
+const SS_EMAIL_KEY = "login_email";
+const SS_PASS_KEY = "login_pass";
+
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [showPass, setShowPass] = useState(false);
+  const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // Nạp thông tin đã lưu (nếu có)
+  useEffect(() => {
+    (async () => {
+      try {
+        const [savedEmail, savedPass] = await Promise.all([
+          SecureStore.getItemAsync(SS_EMAIL_KEY),
+          SecureStore.getItemAsync(SS_PASS_KEY),
+        ]);
+        if (savedEmail) setEmail(savedEmail);
+        if (savedPass) {
+          setPass(savedPass);
+          setRemember(true);
+        }
+      } catch {}
+    })();
+  }, []);
 
   async function handleLogin() {
     if (!email.trim() || !pass) {
@@ -50,7 +73,25 @@ export default function LoginScreen() {
         return Alert.alert("Đăng nhập thất bại", error.message);
       }
 
-      router.replace("/home"); // đổi theo route chính của bạn
+      // Lưu / xoá ghi nhớ đăng nhập
+      try {
+        if (remember) {
+          await SecureStore.setItemAsync(SS_EMAIL_KEY, email.trim().toLowerCase());
+          await SecureStore.setItemAsync(SS_PASS_KEY, pass);
+        } else {
+          await SecureStore.deleteItemAsync(SS_EMAIL_KEY);
+          await SecureStore.deleteItemAsync(SS_PASS_KEY);
+        }
+      } catch {}
+
+      // Điều hướng theo trạng thái onboarding
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (user && !(await hasOnboarded(user.id))) {
+        return router.replace("/onboarding");
+      }
+      router.replace("/home");
     } catch (e: any) {
       Alert.alert("Lỗi không xác định", e?.message ?? "Vui lòng thử lại.");
     } finally {
@@ -73,8 +114,8 @@ export default function LoginScreen() {
 
         <View style={{ gap: 14 }}>
           {/* Email */}
-          <View style={{ backgroundColor: colors.card, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, borderWidth: 1, borderColor: colors.border }}>
-            <Text style={{ color: colors.sub, marginBottom: 6 }}>Email</Text>
+          <Field>
+            <Label>Email</Label>
             <TextInput
               value={email}
               onChangeText={setEmail}
@@ -82,13 +123,17 @@ export default function LoginScreen() {
               placeholderTextColor="#6B7280"
               keyboardType="email-address"
               autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="username"
+              autoComplete="email"
               style={{ color: colors.text, fontSize: 16 }}
+              returnKeyType="next"
             />
-          </View>
+          </Field>
 
           {/* Mật khẩu + HIỆN/ẨN */}
-          <View style={{ backgroundColor: colors.card, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, borderWidth: 1, borderColor: colors.border }}>
-            <Text style={{ color: colors.sub, marginBottom: 6 }}>Mật khẩu</Text>
+          <Field>
+            <Label>Mật khẩu</Label>
             <View style={{ position: "relative" }}>
               <TextInput
                 value={pass}
@@ -96,7 +141,13 @@ export default function LoginScreen() {
                 secureTextEntry={!showPass}
                 placeholder="••••••••"
                 placeholderTextColor="#6B7280"
+                autoCapitalize="none"
+                autoCorrect={false}
+                textContentType="password"
+                autoComplete="password"
                 style={{ color: colors.text, fontSize: 16, paddingRight: 64 }}
+                returnKeyType="go"
+                onSubmitEditing={() => !busy && handleLogin()}
               />
               <Pressable
                 onPress={() => setShowPass((s) => !s)}
@@ -108,7 +159,39 @@ export default function LoginScreen() {
                 </Text>
               </Pressable>
             </View>
-          </View>
+          </Field>
+
+          {/* Ghi nhớ đăng nhập */}
+          <Pressable
+            onPress={() => setRemember((v) => !v)}
+            style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 2 }}
+            android_ripple={{ color: "#333" }}
+          >
+            <View
+              style={{
+                width: 18,
+                height: 18,
+                borderRadius: 4,
+                borderWidth: 2,
+                borderColor: remember ? colors.accent : colors.border,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: remember ? "#3B3B3B" : "transparent",
+              }}
+            >
+              {remember ? (
+                <View
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 2,
+                    backgroundColor: colors.accent,
+                  }}
+                />
+              ) : null}
+            </View>
+            <Text style={{ color: colors.sub }}>Ghi nhớ đăng nhập</Text>
+          </Pressable>
         </View>
 
         {/* Đăng nhập */}
@@ -140,7 +223,33 @@ export default function LoginScreen() {
             </Link>
           </Text>
         </View>
+
+        {/* Nhắc bảo mật nhỏ */}
+        <Text style={{ color: colors.sub, fontSize: 11, marginTop: 12, textAlign: "center" }}>
+          * Mật khẩu được mã hoá cục bộ bằng SecureStore trên thiết bị của bạn.
+        </Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
+}
+
+/* ---------- small UI helpers ---------- */
+function Field({ children }: { children: React.ReactNode }) {
+  return (
+    <View
+      style={{
+        backgroundColor: colors.card,
+        borderRadius: 14,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        borderWidth: 1,
+        borderColor: colors.border,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+function Label({ children }: { children: React.ReactNode }) {
+  return <Text style={{ color: colors.sub, marginBottom: 6 }}>{children}</Text>;
 }

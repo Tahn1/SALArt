@@ -1,35 +1,87 @@
 // app/index.tsx
-import React, { useEffect, useRef } from 'react';
-import { View, Animated, StyleSheet, Dimensions, useColorScheme, Easing, ImageSourcePropType } from 'react-native';
-import { router } from 'expo-router';
+import React, { useEffect, useRef } from "react";
+import {
+  View,
+  Animated,
+  StyleSheet,
+  Dimensions,
+  useColorScheme,
+  Easing,
+  ImageSourcePropType,
+} from "react-native";
+import { router } from "expo-router";
+import { supabase } from "../lib/supabase";
+import { hasOnboarded } from "../lib/onboarding";
 
-const { width } = Dimensions.get('window');
+const { width } = Dimensions.get("window");
 
 const DUR_LOGO = 2000;
 const DUR_TAGLINE = 1000;
 const HOLD_BEFORE_NAV = 3000;
 
 export default function Startup() {
-  const isDark = useColorScheme() === 'dark';
-  const BG = isDark ? '#2B241F' : '#F8F4EF';
+  const isDark = useColorScheme() === "dark";
+  const BG = isDark ? "#2B241F" : "#F8F4EF";
   const logoSrc: ImageSourcePropType = isDark
-    ? require('../assets/logo-white.png')
-    : require('../assets/logo.png');
+    ? require("../assets/logo-white.png")
+    : require("../assets/logo.png");
 
   const fade = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(0.9)).current;
   const taglineFade = useRef(new Animated.Value(0)).current;
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     Animated.sequence([
       Animated.parallel([
-        Animated.timing(fade,  { toValue: 1, duration: DUR_LOGO, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-        Animated.timing(scale, { toValue: 1, duration: DUR_LOGO, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(fade, {
+          toValue: 1,
+          duration: DUR_LOGO,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scale, {
+          toValue: 1,
+          duration: DUR_LOGO,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
       ]),
-      Animated.timing(taglineFade, { toValue: 1, duration: DUR_TAGLINE, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(taglineFade, {
+        toValue: 1,
+        duration: DUR_TAGLINE,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
     ]).start(() => {
-      timeoutRef.current = setTimeout(() => router.replace('/login'), HOLD_BEFORE_NAV);
+      timeoutRef.current = setTimeout(() => {
+        (async () => {
+          try {
+            // 1) Kiểm tra session
+            const {
+              data: { session },
+            } = await supabase.auth.getSession();
+
+            if (!session) {
+              router.replace("/login");
+              return;
+            }
+
+            // 2) Nếu đã login, kiểm tra Onboarding theo user.id
+            const uid = session.user.id;
+            const seen = await hasOnboarded(uid);
+
+            if (!seen) {
+              router.replace("/onboarding");
+            } else {
+              router.replace("/home"); // đổi nếu route màn chính khác
+            }
+          } catch {
+            // Lỗi bất kỳ -> quay về login
+            router.replace("/login");
+          }
+        })();
+      }, HOLD_BEFORE_NAV);
     });
 
     return () => {
@@ -47,7 +99,7 @@ export default function Startup() {
       <Animated.Text
         style={[
           styles.tagline,
-          { opacity: taglineFade, color: isDark ? '#EDEAE6' : '#6B615C' },
+          { opacity: taglineFade, color: isDark ? "#EDEAE6" : "#6B615C" },
         ]}
       >
         Bữa ngon – dấu chân xanh.
@@ -57,7 +109,7 @@ export default function Startup() {
 }
 
 const styles = StyleSheet.create({
-  wrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  wrap: { flex: 1, alignItems: "center", justifyContent: "center" },
   logo: { width: Math.min(width * 0.38, 240), aspectRatio: 1.8 },
   tagline: { marginTop: 10, fontSize: 24, letterSpacing: 0.2 },
 });

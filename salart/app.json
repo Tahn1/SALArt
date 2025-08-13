@@ -8,12 +8,10 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "scheme": "salart",
-
-     "extra": {
+    "extra": {
       "EXPO_PUBLIC_SUPABASE_URL": "https://lrqigquiefqhjewwobwq.supabase.co",
       "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxycWlncXVpZWZxaGpld3dvYndxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ5Mjc3NDEsImV4cCI6MjA3MDUwMzc0MX0.jrIJ6N_IILpbYpCf3RlsDutyF--vhCbaWs_kd0DWLRw"
-    }
-,
+    },
     "splash": {
       "image": "./assets/splash-light-30-v4.png",
       "resizeMode": "contain",
@@ -24,8 +22,9 @@
         "backgroundColor": "#00FF00"
       }
     },
-
-    "ios": { "supportsTablet": true },
+    "ios": {
+      "supportsTablet": true
+    },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -33,6 +32,11 @@
       },
       "edgeToEdgeEnabled": true
     },
-    "web": { "favicon": "./assets/favicon.png" }
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }

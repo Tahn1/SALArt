@@ -29,7 +29,10 @@
     "react-native-safe-area-context": "5.4.0",
     "react-native-url-polyfill": "^2.0.0",
     "zod": "^4.0.17",
-    "zustand": "^5.0.7"
+    "zustand": "^5.0.7",
+    "expo-linear-gradient": "~14.1.5",
+    "expo-image": "~2.4.0",
+    "expo-secure-store": "~14.2.3"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
