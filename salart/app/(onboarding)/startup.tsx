@@ -1,4 +1,3 @@
-// app/index.tsx
 import React, { useEffect, useRef } from "react";
 import {
   View,
@@ -10,26 +9,41 @@ import {
   ImageSourcePropType,
 } from "react-native";
 import { router } from "expo-router";
-import { supabase } from "../lib/supabase";
-import { hasOnboarded } from "../lib/onboarding";
-
+import { supabase } from "../../lib/supabase";
+import { hasOnboardedUser } from "../../lib/onboardingUser";
+import { setOnboarded } from "../../lib/onboarding";
 const { width } = Dimensions.get("window");
 
 const DUR_LOGO = 2000;
 const DUR_TAGLINE = 1000;
-const HOLD_BEFORE_NAV = 3000;
+const HOLD_BEFORE_NAV = 3000; 
 
 export default function Startup() {
   const isDark = useColorScheme() === "dark";
   const BG = isDark ? "#2B241F" : "#F8F4EF";
   const logoSrc: ImageSourcePropType = isDark
-    ? require("../assets/logo-white.png")
-    : require("../assets/logo.png");
+    ? require("../../assets/logo-white.png")
+    : require("../../assets/logo.png");
 
   const fade = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(0.9)).current;
   const taglineFade = useRef(new Animated.Value(0)).current;
+
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const didNavigate = useRef(false);
+
+  // (tuỳ chọn) Đặt cờ đã xem startup — không ảnh hưởng nếu bạn muốn startup hiện mỗi lần
+  useEffect(() => {
+    (async () => {
+      try { await setOnboarded(true); } catch {}
+    })();
+  }, []);
+
+  const navigateOnce = (path: string) => {
+    if (didNavigate.current) return;
+    didNavigate.current = true;
+    router.replace(path);
+  };
 
   useEffect(() => {
     Animated.sequence([
@@ -54,33 +68,19 @@ export default function Startup() {
         useNativeDriver: true,
       }),
     ]).start(() => {
-      timeoutRef.current = setTimeout(() => {
-        (async () => {
-          try {
-            // 1) Kiểm tra session
-            const {
-              data: { session },
-            } = await supabase.auth.getSession();
-
-            if (!session) {
-              router.replace("/login");
-              return;
-            }
-
-            // 2) Nếu đã login, kiểm tra Onboarding theo user.id
-            const uid = session.user.id;
-            const seen = await hasOnboarded(uid);
-
-            if (!seen) {
-              router.replace("/onboarding");
-            } else {
-              router.replace("/home"); // đổi nếu route màn chính khác
-            }
-          } catch {
-            // Lỗi bất kỳ -> quay về login
-            router.replace("/login");
+      timeoutRef.current = setTimeout(async () => {
+        try {
+          const { data } = await supabase.auth.getSession();
+          const sess = data.session;
+          if (!sess) {
+            navigateOnce("/login");
+            return;
           }
-        })();
+          const isUserOnboarded = await hasOnboardedUser(sess.user.id);
+          navigateOnce(isUserOnboarded ? "/" : "/onboarding");
+        } catch {
+          navigateOnce("/login"); // fallback an toàn
+        }
       }, HOLD_BEFORE_NAV);
     });
 

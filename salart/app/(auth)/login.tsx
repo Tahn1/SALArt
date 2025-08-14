@@ -12,7 +12,9 @@ import {
 } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { supabase } from "../../lib/supabase";
-import { hasOnboarded } from "../../lib/onboarding";
+// Nếu bạn vẫn muốn check onboarding ở login, có thể import hasOnboarded,
+// nhưng khuyến nghị để root gate quyết định.
+// import { hasOnboarded } from "../../lib/onboarding";
 
 const colors = {
   bg: "#121212",
@@ -52,14 +54,23 @@ export default function LoginScreen() {
     })();
   }, []);
 
+  function isValidEmail(s: string) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  }
+
   async function handleLogin() {
-    if (!email.trim() || !pass) {
+    const e = email.trim().toLowerCase();
+    if (!e || !pass) {
       return Alert.alert("Thiếu thông tin", "Vui lòng nhập Email và Mật khẩu.");
     }
+    if (!isValidEmail(e)) {
+      return Alert.alert("Email không hợp lệ", "Vui lòng kiểm tra lại định dạng email.");
+    }
+
     try {
       setBusy(true);
       const { error } = await supabase.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
+        email: e,
         password: pass,
       });
 
@@ -70,13 +81,16 @@ export default function LoginScreen() {
             "Vui lòng mở email đã được gửi sau khi đăng ký và bấm vào liên kết xác nhận."
           );
         }
+        if (/invalid.*login|invalid.*credentials|mật khẩu/i.test(error.message)) {
+          return Alert.alert("Sai thông tin", "Email hoặc mật khẩu chưa đúng.");
+        }
         return Alert.alert("Đăng nhập thất bại", error.message);
       }
 
       // Lưu / xoá ghi nhớ đăng nhập
       try {
         if (remember) {
-          await SecureStore.setItemAsync(SS_EMAIL_KEY, email.trim().toLowerCase());
+          await SecureStore.setItemAsync(SS_EMAIL_KEY, e);
           await SecureStore.setItemAsync(SS_PASS_KEY, pass);
         } else {
           await SecureStore.deleteItemAsync(SS_EMAIL_KEY);
@@ -84,16 +98,30 @@ export default function LoginScreen() {
         }
       } catch {}
 
-      // Điều hướng theo trạng thái onboarding
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user && !(await hasOnboarded(user.id))) {
-        return router.replace("/onboarding");
-      }
-      router.replace("/home");
-    } catch (e: any) {
-      Alert.alert("Lỗi không xác định", e?.message ?? "Vui lòng thử lại.");
+      // ✅ Về Home trong (tabs). Root gate sẽ tự xử lý onboarding nếu bạn đã cấu hình.
+      router.replace("/");
+    } catch (err: any) {
+      Alert.alert("Lỗi không xác định", err?.message ?? "Vui lòng thử lại.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleForgotPass() {
+    const e = email.trim().toLowerCase();
+    if (!isValidEmail(e)) {
+      return Alert.alert("Nhập email", "Nhập email của bạn để nhận liên kết đặt lại mật khẩu.");
+    }
+    try {
+      setBusy(true);
+      const { error } = await supabase.auth.resetPasswordForEmail(e, {
+        // với Supabase, cần cấu hình redirectTo trong Auth settings của project
+        // redirectTo: "yourapp://reset-callback"
+      });
+      if (error) return Alert.alert("Không gửi được", error.message);
+      Alert.alert("Đã gửi", "Kiểm tra email của bạn để đặt lại mật khẩu.");
+    } catch (err: any) {
+      Alert.alert("Lỗi", err?.message ?? "Vui lòng thử lại.");
     } finally {
       setBusy(false);
     }
@@ -192,6 +220,17 @@ export default function LoginScreen() {
             </View>
             <Text style={{ color: colors.sub }}>Ghi nhớ đăng nhập</Text>
           </Pressable>
+
+          {/* Quên mật khẩu */}
+          <Pressable
+            onPress={handleForgotPass}
+            style={{ alignSelf: "flex-end", marginTop: 8 }}
+            android_ripple={{ color: "#333" }}
+          >
+            <Text style={{ color: colors.accent, fontSize: 13, fontWeight: "600" }}>
+              Quên mật khẩu?
+            </Text>
+          </Pressable>
         </View>
 
         {/* Đăng nhập */}
@@ -218,7 +257,7 @@ export default function LoginScreen() {
         <View style={{ alignItems: "center", marginTop: 18 }}>
           <Text style={{ color: colors.sub }}>
             Chưa có tài khoản?{" "}
-            <Link href="/signup" style={{ color: colors.accent, fontWeight: "600" }}>
+            <Link href="/register" style={{ color: colors.accent, fontWeight: "600" }}>
               Đăng ký
             </Link>
           </Text>
@@ -226,7 +265,7 @@ export default function LoginScreen() {
 
         {/* Nhắc bảo mật nhỏ */}
         <Text style={{ color: colors.sub, fontSize: 11, marginTop: 12, textAlign: "center" }}>
-          * Mật khẩu được mã hoá cục bộ bằng SecureStore trên thiết bị của bạn.
+          * Mật khẩu được lưu trong SecureStore trên thiết bị của bạn (tuỳ chọn “Ghi nhớ đăng nhập”).
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>

@@ -1,4 +1,3 @@
-// app/onboarding.tsx
 import React, { useEffect, useRef, useState } from "react";
 import {
   View,
@@ -9,12 +8,17 @@ import {
   Platform,
   StyleSheet,
   FlatList,
+  Alert,
 } from "react-native";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
-import { supabase } from "../lib/supabase";
-import { hasOnboarded, setOnboarded } from "../lib/onboarding";
+import { supabase } from "../../lib/supabase";
+// ✅ Dùng LOCAL thay vì DB
+import {
+  hasOnboardedUserLocal,
+  setOnboardedUserLocal,
+} from "../../lib/onboardingUser.local";
 
 const { width, height } = Dimensions.get("window");
 
@@ -28,7 +32,7 @@ const P = {
   white: "#FFFFFF",
 };
 
-// Mức mờ ảnh rất nhẹ (đỡ mờ hơn bản trước)
+// Mờ ảnh rất nhẹ
 const BLUR = Platform.select({ ios: 3, android: 2, default: 3 });
 
 type Page = {
@@ -36,8 +40,8 @@ type Page = {
   focus:
     | "center"
     | "top center"
-    | "center right"
-    | "center left"
+    | "right center"
+    | "left center"
     | "bottom center";
   badge: string;
   title: string;
@@ -46,28 +50,29 @@ type Page = {
 
 const PAGES: Page[] = [
   {
-    image: require("../assets/onboarding/slide1.jpg"),
-    focus: "center right",
+    // ⚠️ Nếu assets nằm trong app/assets → dùng "../assets/..."
+    image: require("../../assets/onboarding/slide1.jpg"),
+    focus: "right center",
     badge: "Eat Green • Live Green • Stay Green",
     title: "Bữa ngon bên nhau",
     desc: "Không gian ấm áp, hương vị tươi lành – mỗi bữa ăn là một khoảnh khắc gắn kết.",
   },
   {
-    image: require("../assets/onboarding/slide2.jpg"),
+    image: require("../../assets/onboarding/slide2.jpg"),
     focus: "center",
     badge: "Fresh • Care • Daily",
     title: "Bếp xanh tận tâm",
     desc: "Chuẩn bị thủ công hằng ngày, lựa chọn nguyên liệu kỹ lưỡng cho sức khỏe & sự an tâm.",
   },
   {
-    image: require("../assets/onboarding/slide3.jpg"),
-    focus: "center right",
+    image: require("../../assets/onboarding/slide3.jpg"),
+    focus: "right center",
     badge: "Sống xanh mỗi ngày",
     title: "Niềm vui từ vườn rau",
     desc: "Hành trình xanh bắt đầu từ những điều nhỏ nhất – gieo trồng, chăm sóc, sẻ chia.",
   },
   {
-    image: require("../assets/onboarding/slide4.jpg"),
+    image: require("../../assets/onboarding/slide4.jpg"),
     focus: "center",
     badge: "Color • Taste • Balance",
     title: "Thực đơn phong phú",
@@ -78,17 +83,27 @@ const PAGES: Page[] = [
 export default function Onboarding() {
   const [idx, setIdx] = useState(0);
   const [uid, setUid] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const listRef = useRef<FlatList>(null);
   const fade = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return router.replace("/login");
+      const { data } = await supabase.auth.getUser();
+      const user = data.user;
+      if (!user) {
+        router.replace("/login"); // chỉ dành cho người đã đăng nhập
+        return;
+      }
       setUid(user.id);
-      if (await hasOnboarded(user.id)) return router.replace("/home");
+
+      // Nếu user đã onboard (LOCAL) -> về Home luôn
+      const ok = await hasOnboardedUserLocal(user.id);
+      if (ok) {
+        router.replace("/");
+        return;
+      }
+
       Animated.timing(fade, {
         toValue: 1,
         duration: 350,
@@ -103,17 +118,24 @@ export default function Onboarding() {
     else finish();
   };
 
-  const finish = async () => {
-    if (uid) await setOnboarded(uid);
-    router.replace("/home");
-  };
+const finish = async () => {
+  if (!uid || submitting) return;
+  try {
+    setSubmitting(true);
+    await setOnboardedUserLocal(uid);          
+    await new Promise(r => setTimeout(r, 0));    
+    router.replace("/");                         
+  } catch (e: any) {
+    Alert.alert("Lỗi", e?.message ?? "Không thể hoàn tất onboarding.");
+  } finally {
+    setSubmitting(false);
+  }
+};
 
   if (!uid) return <View style={{ flex: 1, backgroundColor: P.cream }} />;
 
   return (
-    <Animated.View
-      style={{ flex: 1, backgroundColor: P.cream, opacity: fade }}
-    >
+    <Animated.View style={{ flex: 1, backgroundColor: P.cream, opacity: fade }}>
       <FlatList
         ref={listRef}
         data={PAGES}
@@ -162,8 +184,14 @@ export default function Onboarding() {
             onPress={finish}
           />
           <BtnFilled
-            title={idx < PAGES.length - 1 ? "TIẾP TỤC" : "HOÀN TẤT"}
-            onPress={goNext}
+            title={
+              submitting
+                ? "ĐANG LƯU..."
+                : idx < PAGES.length - 1
+                ? "TIẾP TỤC"
+                : "HOÀN TẤT"
+            }
+            onPress={submitting ? undefined : goNext}
           />
         </View>
       </View>
@@ -171,9 +199,8 @@ export default function Onboarding() {
   );
 }
 
-/* ---------------- Slide (ảnh mờ nhẹ + gradient vừa + typography sang hơn) ---------------- */
+/* ---------------- Slide (ảnh mờ nhẹ + gradient + typography) ---------------- */
 function Slide({ page, active }: { page: Page; active: boolean }) {
-  // Animations
   const badgeOp = useRef(new Animated.Value(0)).current;
   const titleY = useRef(new Animated.Value(8)).current;
   const titleOp = useRef(new Animated.Value(0)).current;
@@ -182,28 +209,12 @@ function Slide({ page, active }: { page: Page; active: boolean }) {
   useEffect(() => {
     if (active) {
       Animated.sequence([
-        Animated.timing(badgeOp, {
-          toValue: 1,
-          duration: 240,
-          useNativeDriver: true,
-        }),
+        Animated.timing(badgeOp, { toValue: 1, duration: 240, useNativeDriver: true }),
         Animated.parallel([
-          Animated.timing(titleY, {
-            toValue: 0,
-            duration: 380,
-            useNativeDriver: true,
-          }),
-          Animated.timing(titleOp, {
-            toValue: 1,
-            duration: 380,
-            useNativeDriver: true,
-          }),
+          Animated.timing(titleY, { toValue: 0, duration: 380, useNativeDriver: true }),
+          Animated.timing(titleOp, { toValue: 1, duration: 380, useNativeDriver: true }),
         ]),
-        Animated.timing(descOp, {
-          toValue: 1,
-          duration: 240,
-          useNativeDriver: true,
-        }),
+        Animated.timing(descOp, { toValue: 1, duration: 240, useNativeDriver: true }),
       ]).start();
     } else {
       badgeOp.setValue(0);
@@ -215,31 +226,29 @@ function Slide({ page, active }: { page: Page; active: boolean }) {
 
   return (
     <View style={{ width, height }}>
-      {/* Ảnh nền – mờ rất nhẹ + căn trọng tâm cho đúng bố cục */}
+      {/* Ảnh nền */}
       <Image
         source={page.image}
         style={StyleSheet.absoluteFill}
         contentFit="cover"
-        contentPosition={page.focus}
+        contentPosition={page.focus} // ✅ "right center" / "left center" / "center"
         blurRadius={BLUR}
         transition={200}
       />
 
-      {/* Gradient nhẹ (ít tối hơn) để giữ chi tiết ảnh */}
+      {/* Gradient nhẹ */}
       <LinearGradient
         colors={[
-          "rgba(0,0,0,0.12)", // đỉnh
-          "rgba(0,0,0,0.06)", // giữa
-          "rgba(248,244,239,0.84)", // chân
+          "rgba(0,0,0,0.12)",
+          "rgba(0,0,0,0.06)",
+          "rgba(248,244,239,0.84)",
         ]}
         locations={[0, 0.45, 1]}
         style={StyleSheet.absoluteFill}
       />
 
-      {/* Badge pill (fade-in) */}
-      <Animated.View
-        style={{ position: "absolute", top: 64, left: 22, right: 22, opacity: badgeOp }}
-      >
+      {/* Badge pill */}
+      <Animated.View style={{ position: "absolute", top: 64, left: 22, right: 22, opacity: badgeOp }}>
         <View
           style={{
             alignSelf: "flex-start",
@@ -251,19 +260,13 @@ function Slide({ page, active }: { page: Page; active: boolean }) {
             borderColor: P.border,
           }}
         >
-          <Text
-            style={{
-              color: P.leaf,
-              fontWeight: "800",
-              letterSpacing: 0.3,
-            }}
-          >
+          <Text style={{ color: P.leaf, fontWeight: "800", letterSpacing: 0.3 }}>
             {page.badge}
           </Text>
         </View>
       </Animated.View>
 
-      {/* Card nội dung – gradient tinh tế + viền kem */}
+      {/* Card nội dung */}
       <View
         style={{
           position: "absolute",
@@ -288,7 +291,6 @@ function Slide({ page, active }: { page: Page; active: boolean }) {
           end={{ x: 1, y: 1 }}
           style={{ paddingVertical: 18, paddingHorizontal: 18 }}
         >
-          {/* Tiêu đề: đậm, ấm, có nhấn gạch & bóng chữ rất nhẹ */}
           <Animated.Text
             style={{
               color: P.ink,
@@ -330,7 +332,6 @@ function Slide({ page, active }: { page: Page; active: boolean }) {
             {page.desc}
           </Animated.Text>
 
-          {/* Thanh trang trí nâu (nhỏ gọn hơn) */}
           <View
             style={{
               marginTop: 14,
