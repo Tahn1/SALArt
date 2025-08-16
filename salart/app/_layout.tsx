@@ -1,57 +1,85 @@
+// app/_layout.tsx
 import React, { useEffect, useState } from "react";
-import { Stack, useRouter, useSegments } from "expo-router";
+import { View } from "react-native";
+import { Stack, Redirect, useSegments } from "expo-router";
 import { supabase } from "../lib/supabase";
-import { hasOnboardedUserLocal } from "../lib/onboardingUser.local";
+import { hasOnboardedUserLocal } from "../lib/onboardingUser.local"; // dùng LOCAL
+
+type Phase = "loading" | "anon" | "needsOnb" | "authed";
 
 export default function RootLayout() {
-  const router = useRouter();
   const segments = useSegments();
+  const group = (segments[0] as string | undefined) ?? undefined;
 
-  const [loading, setLoading] = useState(true);
-  const [session, setSession] = useState<any>(null);
-  const [userOnb, setUserOnb] = useState<boolean | null>(null);
+  const [phase, setPhase] = useState<Phase>("loading");
 
   useEffect(() => {
     let unsub: any;
     (async () => {
+      // đọc session hiện tại
       const { data } = await supabase.auth.getSession();
-      setSession(data.session ?? null);
-      if (data.session?.user) {
-        setUserOnb(await hasOnboardedUserLocal(data.session.user.id));
+      const sess = data.session;
+
+      if (!sess) {
+        setPhase("anon");
+      } else {
+        const ok = await hasOnboardedUserLocal(sess.user.id);
+        setPhase(ok ? "authed" : "needsOnb");
       }
+
+      // lắng nghe thay đổi phiên
       unsub = supabase.auth.onAuthStateChange(async (_e, s) => {
-        setSession(s);
-        if (s?.user) setUserOnb(await hasOnboardedUserLocal(s.user.id));
-        else setUserOnb(null);
+        if (!s?.user) {
+          setPhase("anon");
+          return;
+        }
+        const ok = await hasOnboardedUserLocal(s.user.id);
+        setPhase(ok ? "authed" : "needsOnb");
       });
-      setLoading(false);
     })();
+
     return () => {
       try { unsub?.data?.subscription?.unsubscribe?.(); } catch {}
       try { unsub?.subscription?.unsubscribe?.(); } catch {}
     };
   }, []);
 
-  useEffect(() => {
-    if (loading) return;
-    const group = segments[0]; // "(onboarding)" | "(auth)" | "(tabs)" | undefined
+  // ======= GATE =======
+  // loading: nền trống, không render con để tránh nháy Home
+  if (phase === "loading") {
+    return <View style={{ flex: 1, backgroundColor: "#F8F4EF" }} />;
+  }
 
-    if (!session) {
-      // Cho phép Startup/Login khi chưa đăng nhập
-      if (group === "(onboarding)" || group === "(auth)") return;
-      router.replace("/startup");
-      return;
+  // CHƯA đăng nhập -> cho phép hiển thị nhóm (onboarding) (startup)
+  if (phase === "anon") {
+    if (group === "(onboarding)" || group === "(auth)") {
+      // đang ở đúng nhóm: render các màn startup/login
+      return <Stack screenOptions={{ headerShown: false }} />;
     }
+    // đang ở nhóm khác -> chuyển về startup
+    return <Redirect href="/startup" />;
+  }
 
-    if (userOnb === false && group !== "(onboarding)") {
-      router.replace("/onboarding");
-      return;
+  // ĐÃ đăng nhập nhưng CHƯA onboard (user)
+  if (phase === "needsOnb") {
+    if (group === "(onboarding)") {
+      // đã ở đúng nhóm → hiển thị /onboarding
+      return <Stack screenOptions={{ headerShown: false }} />;
     }
-    if (userOnb && group !== "(tabs)") {
-      router.replace("/");
-      return;
-    }
-  }, [loading, session, userOnb, segments]);
+    // ép qua /onboarding
+    return <Redirect href="/onboarding" />;
+  }
 
+  // ĐÃ đăng nhập & ĐÃ onboard -> nhóm (tabs)
+  if (phase === "authed") {
+    if (group === "(tabs)") {
+      // đã ở tabs -> render Home/Tab
+      return <Stack screenOptions={{ headerShown: false }} />;
+    }
+    // chuyển vào /
+    return <Redirect href="/" />;
+  }
+
+  // fallback (không bao giờ tới)
   return <Stack screenOptions={{ headerShown: false }} />;
 }
