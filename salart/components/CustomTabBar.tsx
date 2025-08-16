@@ -2,25 +2,26 @@ import React, { useEffect, useRef } from "react";
 import { View, Text, Pressable, StyleSheet, Animated } from "react-native";
 import { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useCart } from "../lib/cart";
 
 const C = { white: "#fff", brown: "#522504", ink: "#1d130b" };
 
-// SVG icons (giữ đúng đường dẫn bạn đang dùng)
+// SVG icons
 import HomeIcon from "../assets/icons/home.svg";
 import MenuIcon from "../assets/icons/salad.svg";
 import LeafIcon from "../assets/icons/leaf.svg";   // garden
-import BagIcon from "../assets/icons/bag.svg";     // orders
+import BagIcon from "../assets/icons/bag.svg";     // cart
 import HeartIcon from "../assets/icons/heart.svg"; // profile
 
-const VALID_ROUTES = ["index", "menu", "garden", "orders", "profile"] as const;
+// Chỉ hiển thị các route dưới (khớp với (tabs)/_layout.tsx)
+const VALID_ROUTES = ["index", "menu", "garden", "cart", "profile"] as const;
 
 export default function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
   const inset = useSafeAreaInsets();
   const plateH = 110 + (inset.bottom || 0);
 
-  const lifts = useRef(
-    Object.fromEntries(state.routes.map(r => [r.key, new Animated.Value(0)]))
-  ).current;
+  // anim nâng icon
+  const lifts = useRef(Object.fromEntries(state.routes.map(r => [r.key, new Animated.Value(0)]))).current;
 
   useEffect(() => {
     state.routes.forEach((route, i) => {
@@ -32,12 +33,17 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
     });
   }, [state.index]);
 
-  const MAP: Record<string, React.ComponentType<any>> = {
+  // Badge giỏ hàng
+  const { items } = useCart();
+  const cartQty = items.reduce((s, it) => s + it.qty, 0);
+
+  const ICON_MAP: Record<string, React.ComponentType<any>> = {
     index: HomeIcon,
     menu: MenuIcon,
     garden: LeafIcon,
-    orders: BagIcon,
+    cart: BagIcon,
     profile: HeartIcon,
+    // orders: BagIcon, // nếu còn route orders thì thêm lại
   };
 
   return (
@@ -45,20 +51,29 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
       <View style={styles.plate} />
       <View style={styles.row}>
         {state.routes
-          .filter(r => VALID_ROUTES.includes(r.name as any)) // bỏ mọi route lạ (gift…)
-          .map((route, index) => {
-            const isFocused = state.index === index;
-            const Icon = MAP[route.name]!;
+          .filter(r => VALID_ROUTES.includes(r.name as any))
+          .map((route) => {
+            // FIX: xác định focus theo route.key (không dùng index sau khi filter)
+            const isFocused = state.routes[state.index]?.key === route.key;
+            const Icon = ICON_MAP[route.name] ?? BagIcon;
+
             const onPress = () => {
               const e = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
               if (!isFocused && !e.defaultPrevented) navigation.navigate(route.name);
             };
+
             return (
-              <Pressable key={route.key} onPress={onPress} style={styles.item} android_ripple={{ color: "#eee", borderless: true }}>
+              <Pressable
+                key={route.key}
+                onPress={onPress}
+                style={styles.item}
+                android_ripple={{ color: "#eee", borderless: true }}
+              >
                 <Animated.View style={{ alignItems: "center", transform: [{ translateY: lifts[route.key] }], zIndex: 2 }}>
                   <View style={styles.iconWrap}>
                     <Icon width={26} height={26} color={C.ink} style={{ opacity: isFocused ? 0 : 1 }} />
                   </View>
+
                   {isFocused && (
                     <>
                       <View pointerEvents="none" style={styles.halo} />
@@ -67,7 +82,28 @@ export default function CustomTabBar({ state, descriptors, navigation }: BottomT
                       </View>
                     </>
                   )}
+
+                  {/* BADGE cho tab cart */}
+                  {route.name === "cart" && cartQty > 0 && (
+                    <View
+                      style={{
+                        position: "absolute",
+                        right: -2,
+                        top: -4,
+                        minWidth: 18,
+                        height: 18,
+                        borderRadius: 9,
+                        backgroundColor: "#ef4444",
+                        paddingHorizontal: 5,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 11 }}>{cartQty}</Text>
+                    </View>
+                  )}
                 </Animated.View>
+
                 <Text
                   style={[styles.label, isFocused ? styles.labelOn : styles.labelOff]}
                   numberOfLines={1}
