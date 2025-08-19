@@ -1,12 +1,11 @@
 import React from "react";
 import { View, Text, StyleSheet, Dimensions, Pressable, StatusBar } from "react-native";
-import Animated from "react-native-reanimated";
 import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
+import { Asset } from "expo-asset";
 
-// ĐƯỜNG DẪN ẢNH (đặt trong app/assets/)
-import hero1 from "../../assets/home/home1.png";
-import hero2 from "../../assets/home/home2.png";
+import hero from "../../assets/home/home2.png";            // ✅ chỉ dùng 1 ảnh ổn định
 import profileImg from "../../assets/avatars/profile.png";
 import stickerImg from "../../assets/avatars/3d_avatar_22.png";
 
@@ -14,37 +13,42 @@ const { width: W, height: H } = Dimensions.get("window");
 
 export default function Home() {
   const insets = useSafeAreaInsets();
-  const TAB_PLATE_H = 110 + (insets.bottom || 0); // chiều cao nền tab bar to hơn
-  const STICKER_BOTTOM = TAB_PLATE_H + 14;        // sticker luôn nằm trên tab bar
+  const TAB_PLATE_H = 110 + (insets.bottom || 0);
+  const STICKER_BOTTOM = TAB_PLATE_H + 14;
+
+  const [imgFailed, setImgFailed] = React.useState(false);
+
+  // Prefetch ảnh để chắc chắn có sẵn (giảm flash)
+  React.useEffect(() => {
+    Asset.fromModule(hero).downloadAsync().catch(() => {});
+  }, []);
 
   return (
     <View style={styles.root}>
       <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
 
-      {/* 2 trang full-screen, snap đúng chiều cao màn hình, không bounce ⇒ ảnh liền mạch */}
-      <Animated.ScrollView
-        style={{ flex: 1 }}
-        pagingEnabled
-        snapToInterval={H}
-        decelerationRate="fast"
-        bounces={false}
-        alwaysBounceVertical={false}
-        overScrollMode="never"
-        contentInsetAdjustmentBehavior="never"
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Trang 1 */}
-        <View style={{ height: H }}>
-          <Image source={hero1} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
-        </View>
+      {/* Khối hero 1 trang */}
+      <View style={{ height: H }}>
+        {/* Nền gradient để không bao giờ trắng */}
+        <LinearGradient
+          colors={["#0B0B0B", "#141414"]}
+          style={StyleSheet.absoluteFill}
+        />
+        {/* Ảnh chính: nếu lỗi sẽ ẩn, để lộ gradient */}
+        {!imgFailed && (
+          <Image
+            source={hero}
+            style={StyleSheet.absoluteFill}
+            contentFit="cover"
+            priority="high"
+            cachePolicy="immutable"
+            transition={150}
+            onError={() => setImgFailed(true)}
+          />
+        )}
+      </View>
 
-        {/* Trang 2 */}
-        <View style={{ height: H }}>
-          <Image source={hero2} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
-        </View>
-      </Animated.ScrollView>
-
-      {/* Overlay: luôn hiện trên cả 2 ảnh */}
+      {/* Overlay */}
       <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
         {/* Tiêu đề góc trái trên */}
         <View style={{ position: "absolute", left: 24, top: Math.max(insets.top + 10, 90), width: W - 48 }}>
@@ -74,7 +78,7 @@ export default function Home() {
           <Image source={profileImg} style={{ width: "100%", height: "100%" }} contentFit="cover" />
         </View>
 
-        {/* Sticker tròn góc trái dưới (neo theo bottom để không bị tab bar che) */}
+        {/* Sticker neo đáy, không bị tab bar che */}
         <Pressable
           style={{
             position: "absolute",
@@ -109,7 +113,8 @@ export default function Home() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#FFFFFF" },
+  // nền tối để không lộ trắng khi đang load
+  root: { flex: 1, backgroundColor: "#0B0B0B" },
   title: {
     color: "#FFFFFF",
     fontSize: 28,

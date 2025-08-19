@@ -10,8 +10,7 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { supabase } from "../../lib/supabase";
-import { hasOnboardedUser } from "../../lib/onboardingUser";
-import { setOnboarded } from "../../lib/onboarding";
+import { hasOnboardedUserLocal } from "../../lib/onboardingUser.local";
 const { width } = Dimensions.get("window");
 
 const DUR_LOGO = 2000;
@@ -76,7 +75,7 @@ export default function Startup() {
             navigateOnce("/login");
             return;
           }
-          const isUserOnboarded = await hasOnboardedUser(sess.user.id);
+          const isUserOnboarded = await hasOnboardedUserLocal(sess.user.id);
           navigateOnce(isUserOnboarded ? "/" : "/onboarding");
         } catch {
           navigateOnce("/login"); // fallback an toàn
