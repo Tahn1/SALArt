@@ -7,16 +7,17 @@ import CustomTabBar from "../../components/CustomTabBar";
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
 
-  // Chiều cao "đĩa" TabBar theo thiết kế của bạn (không gồm safe area)
+  // Chiều cao "đĩa" TabBar theo thiết kế (không gồm safe area)
   const TAB_PLATE_BASE = 110;
   const tabBarHeight = TAB_PLATE_BASE + (insets.bottom || 0);
 
   return (
     <Tabs
-      initialRouteName="index"                  // Trang chủ
+      id="rootTabs"
+      initialRouteName="index"
       screenOptions={{
         headerShown: false,
-        // Cho RN biết chiều cao thật của TabBar để tự chừa đáy cho mọi scene
+        // Chừa đáy cho các màn trong tabs
         sceneContainerStyle: { paddingBottom: tabBarHeight },
         tabBarStyle: {
           height: tabBarHeight,
@@ -27,28 +28,29 @@ export default function TabLayout() {
         },
         tabBarHideOnKeyboard: true,
       }}
-      // Nếu bạn dùng CustomTabBar, truyền luôn height để vẽ đúng
-      tabBar={(props) => <CustomTabBar {...props} height={tabBarHeight} />}
+      // Truyền cả `style` xuống custom bar để có thể nhận display:none
+      tabBar={(props) => (
+        <CustomTabBar {...props} height={tabBarHeight} style={props.style} />
+      )}
     >
-      {/* Thứ tự hiển thị = thứ tự khai báo dưới đây */}
       <Tabs.Screen
-        name="index"                            // ✅ phải là tên file: app/(tabs)/index.tsx
+        name="index"
         options={{ tabBarLabel: "Trang chủ", title: "Trang chủ" }}
       />
       <Tabs.Screen
-        name="menu"                             // app/(tabs)/menu.tsx
+        name="menu"
         options={{ tabBarLabel: "Thực đơn", title: "Thực đơn" }}
       />
       <Tabs.Screen
-        name="garden"                           // app/(tabs)/garden.tsx
+        name="garden"
         options={{ tabBarLabel: "Hành trình", title: "Hành trình" }}
       />
       <Tabs.Screen
-        name="cart"                             // app/(tabs)/cart.tsx
+        name="cart"
         options={{ tabBarLabel: "Giỏ hàng", title: "Giỏ hàng" }}
       />
       <Tabs.Screen
-        name="profile"                          // app/(tabs)/profile.tsx
+        name="profile"
         options={{ tabBarLabel: "WOWCARE", title: "WOWCARE" }}
       />
     </Tabs>

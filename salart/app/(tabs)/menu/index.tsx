@@ -1,16 +1,16 @@
-// app/(tabs)/menu.tsx
 import React, { useEffect, useMemo, useState, useCallback, memo } from "react";
 import {
   ActivityIndicator, Alert, Pressable,
   ScrollView, Text, TextInput, View, StatusBar, Dimensions, PixelRatio, InteractionManager
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { supabase } from "../../lib/supabase";
-import { addToCart } from "../../lib/cart";
+import { supabase } from "../../../lib/supabase";
+import { addToCart } from "../../../lib/cart";
 import { Image } from "expo-image";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { FlashList } from "@shopify/flash-list";
+import { router } from "expo-router"; // ✅ thêm để điều hướng sang chi tiết
 
 type Dish = {
   id: number;
@@ -33,7 +33,7 @@ const IMAGE_BUCKET = "dishes";
 const FALLBACK =
   "https://images.unsplash.com/photo-1551218808-94e220e084d2?q=80&w=1200&auto=format&fit=crop";
 
-// ==== Tính kích thước ảnh mục tiêu (mượt + “zoom nhẹ”) ====
+// ==== Kích thước ảnh mục tiêu (mượt + “mờ nhẹ”) ====
 const SCREEN_W   = Dimensions.get("window").width;
 const CARD_W     = SCREEN_W - 24;         // marginHorizontal: 12 x 2
 const IMG_W      = CARD_W - PAD * 2;      // paddingHorizontal trong vùng ảnh
@@ -41,34 +41,33 @@ const DPR        = Math.min(2, PixelRatio.get()); // 2x là đủ đẹp
 const SCALE_DOWN = 0.72;                  // xin ảnh nhỏ hơn -> upsample nhẹ => mờ mờ, đỡ lag
 const LQIP_W     = 24;                    // placeholder siêu nhỏ để hiện ngay
 
-// Helper: trả URL ảnh chính (WebP + cover + “zoom nhẹ”)
-function urlForDish(path?: string | null, ver?: number) {
-  if (!path) return FALLBACK;
-  const safePath = path.replace(/^dishes\/dishes\//, "dishes/"); // phòng ghi key lặp
-  const targetW = Math.max(420, Math.round(IMG_W * DPR * SCALE_DOWN));
-  const u = supabase.storage.from(IMAGE_BUCKET).getPublicUrl(safePath, {
-    transform: {
-      width: targetW,
-      quality: 70,       // giảm chút cho nhẹ
-      resize: "cover",   // fill khung -> phóng nhẹ
-      format: "webp",    // bật WebP cho nhẹ băng thông
-    },
-  }).data.publicUrl;
-  return ver ? (u + (u.includes("?") ? `&v=${ver}` : `?v=${ver}`)) : u;
-}
-
-// Helper: URL placeholder low-res (WebP)
-function urlTinyDish(path?: string | null) {
-  if (!path) return FALLBACK;
+// ===== Helpers build URL (ưu tiên WebP, fallback JPEG/PNG) =====
+function buildUrl(path: string, opts: { w: number; q: number; resize: "cover" | "contain"; webp?: boolean }) {
   const safePath = path.replace(/^dishes\/dishes\//, "dishes/");
   return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(safePath, {
     transform: {
-      width: LQIP_W,
-      quality: 20,
-      resize: "cover",
-      format: "webp",
+      width: opts.w,
+      quality: opts.q,
+      resize: opts.resize,
+      ...(opts.webp ? { format: "webp" as const } : {}),
     },
   }).data.publicUrl;
+}
+
+// 👉 ĐỔI sang "contain" để không bị crop
+function urlMainWebp(path?: string | null) {
+  if (!path) return FALLBACK;
+  const targetW = Math.max(420, Math.round(IMG_W * DPR * SCALE_DOWN));
+  return buildUrl(path, { w: targetW, q: 70, resize: "contain", webp: true });
+}
+function urlMainFallback(path?: string | null) {
+  if (!path) return FALLBACK;
+  const targetW = Math.max(420, Math.round(IMG_W * DPR * SCALE_DOWN));
+  return buildUrl(path, { w: targetW, q: 80, resize: "contain" });
+}
+function urlTiny(path?: string | null, webp = true) {
+  if (!path) return FALLBACK;
+  return buildUrl(path, { w: LQIP_W, q: 20, resize: "contain", webp });
 }
 
 function fmt1(x?: number | null) {
@@ -168,10 +167,12 @@ export default function MenuScreen() {
 
       setItems(next);
 
-      // Prefetch 2–3 ảnh đầu (high-res vừa đủ) để scroll mượt hơn
-      next.slice(0, 3)
-        .map((it) => urlForDish(it.image_path))
-        .forEach((u) => Image.prefetch(u).catch(() => {}));
+      // Prefetch 2–3 ảnh đầu: thử webp trước (contain)
+      next.slice(0, 3).forEach((it) => {
+        Image.prefetch(urlMainWebp(it.image_path)).catch(() => {
+          Image.prefetch(urlMainFallback(it.image_path)).catch(() => {});
+        });
+      });
     } catch (e: any) {
       Alert.alert("Lỗi tải thực đơn", e?.message ?? "Không thể tải dữ liệu");
     } finally {
@@ -179,7 +180,7 @@ export default function MenuScreen() {
     }
   }, []);
 
-  // Trì hoãn load cho đến khi animation/transition xong để tránh giật khung đầu phiên
+  // Trì hoãn load để tránh giật khung đầu phiên
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(load);
     return () => task.cancel();
@@ -238,14 +239,14 @@ export default function MenuScreen() {
         />
       </View>
 
-      {/* FlashList thay cho FlatList */}
+      {/* FlashList */}
       <FlashList
         data={filtered}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
-        estimatedItemSize={520} // ước lượng chiều cao 1 card để virtualize mượt
-        contentContainerStyle={{ paddingHorizontal: 0, paddingBottom: bottomSpace }}
-        scrollIndicatorInsets={{ bottom: bottomSpace }}
+        estimatedItemSize={520}
+        contentContainerStyle={{ paddingHorizontal: 0, paddingBottom: Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16 }}
+        scrollIndicatorInsets={{ bottom: Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16 }}
         keyboardShouldPersistTaps="handled"
         onRefresh={load}
         refreshing={loading}
@@ -255,17 +256,54 @@ export default function MenuScreen() {
   );
 }
 
+// ===== Ảnh có fallback WebP -> JPEG/PNG (KHÔNG CROP) =====
+const ImgWithFallback = ({ path, recyclingKey }: { path?: string | null; recyclingKey: string }) => {
+  const [useWebp, setUseWebp] = useState(true);
+  const sourceUri = useWebp ? urlMainWebp(path) : urlMainFallback(path);
+  const tinyUri   = urlTiny(path, useWebp);
+
+  return (
+    <Image
+      source={{ uri: sourceUri }}
+      placeholder={{ uri: tinyUri }}
+      placeholderContentFit="contain"   // không crop placeholder
+      style={{ width: "100%", aspectRatio: 4/3, borderRadius: 14 }}
+      contentFit="contain"              // 👈 không cắt ảnh, thấy trọn cái bát
+      transition={120}
+      priority="low"
+      cachePolicy="immutable"
+      recyclingKey={recyclingKey}
+      onError={() => setUseWebp(false)} // nếu webp lỗi -> fallback
+    />
+  );
+};
+
+// ✅ SỬA: bọc toàn bộ card bằng Pressable để mở màn chi tiết
 const MenuCard = memo(function MenuCard({
   item, onAdd,
 }: {
   item: Dish;
   onAdd: (it: Dish) => void;
 }) {
+  const openDetail = () => {
+    router.push({
+      pathname: "/menu/[id]",                    // không có (tabs)
+      params: {
+        id: String(item.id),
+        name: item.name,
+        image: urlMainWebp(item.image_path),     // truyền sẵn URL ảnh đã transform
+      },
+    });
+  };
+
   return (
-    <View style={{
-      marginHorizontal: 12, marginBottom: 14, borderRadius: 16, overflow: "hidden",
-      borderWidth: 1, borderColor: "#e5e7eb", backgroundColor: BG,
-    }}>
+    <Pressable
+      onPress={openDetail}
+      style={{
+        marginHorizontal: 12, marginBottom: 14, borderRadius: 16, overflow: "hidden",
+        borderWidth: 1, borderColor: "#e5e7eb", backgroundColor: BG,
+      }}
+    >
       {/* Text block */}
       <View style={{ padding: PAD }}>
         <View style={{ flexDirection:"row", alignItems:"center", justifyContent:"space-between" }}>
@@ -298,20 +336,9 @@ const MenuCard = memo(function MenuCard({
         )}
       </View>
 
-      {/* Ảnh từ Storage — placeholder LQIP + zoom nhẹ (WebP) */}
+      {/* Ảnh: LQIP + WebP ưu tiên + fallback (contain) */}
       <View style={{ backgroundColor: BG, paddingHorizontal: PAD, paddingBottom: 12 }}>
-        <Image
-          source={{ uri: urlForDish(item.image_path) }}
-          placeholder={{ uri: urlTinyDish(item.image_path) }}
-          placeholderContentFit="cover"
-          style={{ width: "100%", aspectRatio: 4/3, borderRadius: 14 }}
-          contentFit="cover"      // phóng nhẹ, trông đầy khung
-          transition={120}        // fade mượt từ LQIP -> ảnh chính
-          priority="low"
-          cachePolicy="immutable"
-          recyclingKey={String(item.id)}
-          onError={() => {}}
-        />
+        <ImgWithFallback path={item.image_path} recyclingKey={String(item.id)} />
       </View>
 
       {/* Pills dinh dưỡng */}
@@ -325,14 +352,16 @@ const MenuCard = memo(function MenuCard({
         {typeof item.protein === "number" && <Pill label={`P ${fmt1(item.protein)}g`} />}
       </View>
 
+      {/* Nút thêm vào giỏ: vẫn hoạt động độc lập */}
       <View style={{ paddingHorizontal: PAD, paddingBottom: PAD, flexDirection:"row", justifyContent:"flex-end" }}>
         <Pressable
           onPress={() => onAdd(item)}
-          style={{ backgroundColor: "#1f2937", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 }}>
+          style={{ backgroundColor: "#1f2937", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 }}
+        >
           <Text style={{ color: "#fff", fontWeight: "800" }}>Thêm vào giỏ</Text>
         </Pressable>
       </View>
-    </View>
+    </Pressable>
   );
 });
 
