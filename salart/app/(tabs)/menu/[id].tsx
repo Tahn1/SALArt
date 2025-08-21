@@ -25,9 +25,9 @@ type DishRow = {
 type Topping = {
   id: string | number;
   name: string;
-  image_path?: string | null;
-  amount_per_unit_g: number;  // gram mỗi step
-  extra_price_vnd: number;    // phụ thu / 1 step (sẽ map -> extra_price_vnd_per_unit khi addToCart)
+  image_key?: string | null;    // KEY trong bucket ingredients
+  amount_per_unit_g: number;    // gram mỗi step
+  extra_price_vnd: number;      // phụ thu / 1 step
   kcal_pu: number;
   protein_pu: number;
   fat_pu: number;
@@ -53,22 +53,144 @@ const fmtVND = (n = 0) => {
   catch { return `${Math.round(n)} đ`; }
 };
 
+// ======= Storage helpers (INGREDIENT IMAGES) =======
+const SUPA_PUBLIC = (bucket: string) => new RegExp(`^https?://[^?]+/storage/v1/object/public/${bucket}/`, "i");
+const SUPA_SIGN   = (bucket: string) => new RegExp(`^https?://[^?]+/storage/v1/object/sign/${bucket}/`, "i");
+
+function toBucketKey(bucket: "dishes" | "ingredients", path?: string | null) {
+  let key = String(path || "").trim();
+  if (!key) return "";
+  key = key.replace(SUPA_PUBLIC(bucket), "").replace(SUPA_SIGN(bucket), "");
+  key = key.replace(/^\/+/, "");
+  if (!key.includes("/")) key = `${bucket}/${key}`;
+  key = key.replace(new RegExp(`^${bucket}\\/(?:${bucket}\\/)+`, "i"), `${bucket}/`);
+  return key;
+}
+
+function buildStorageUrl(
+  bucket: "dishes" | "ingredients",
+  key: string,
+  w: number,
+  q: number,
+  webp: boolean,
+  resize: "contain" | "cover" = "contain",
+  h?: number
+) {
+  if (!key) return null;
+  return supabase.storage.from(bucket).getPublicUrl(key, {
+    transform: {
+      width: w,
+      ...(h ? { height: h } : {}),
+      quality: q,
+      resize,
+      ...(webp ? { format: "webp" as const } : {}),
+    },
+  }).data.publicUrl;
+}
+
+// Ảnh add-on (bucket "ingredients")
+const ING_DEFAULT_KEY = "ingredients/default.jpg";
+const ingWebp = (key?: string | null, size = 160) =>
+  buildStorageUrl("ingredients", key || ING_DEFAULT_KEY, size, 75, true,  "cover", size);
+const ingJpg  = (key?: string | null, size = 160) =>
+  buildStorageUrl("ingredients", key || ING_DEFAULT_KEY, size, 85, false, "cover", size);
+
+const AddonImg = ({ imageKey }: { imageKey?: string | null }) => {
+  const [useJpg, setUseJpg] = useState(false);
+  const uri = useJpg ? ingJpg(imageKey) : ingWebp(imageKey);
+  return (
+    <Image
+      source={{ uri: uri || undefined }}
+      style={{ width: "100%", height: "100%" }}
+      contentFit="cover"
+      transition={140}
+      cachePolicy="immutable"
+      onError={() => setUseJpg(true)}
+    />
+  );
+};
+
+// ======== LẤY ADD-ON TỪ ingredient_addon_config ========
+async function fetchAddonsFromConfig(dishId: number): Promise<Topping[]> {
+  const diRes = await supabase
+    .from("dish_ingredients")
+    .select(`
+      ingredient_id,
+      category,
+      ingredients:ingredients_nutrition(
+        name,
+        image_path,
+        kcal_100g,
+        protein_g_100g,
+        fat_g_100g,
+        carbs_g_100g
+      )
+    `)
+    .eq("dish_id", dishId);
+
+  if (diRes.error) return [];
+
+  const rows = (diRes.data ?? []) as any[];
+  const addonRows = rows.filter(r => String(r?.category ?? "").toLowerCase() !== "base");
+
+  const idSet = new Set<number | string>();
+  const ingredientInfo: Record<string | number, any> = {};
+  for (const r of addonRows) {
+    idSet.add(r.ingredient_id);
+    ingredientInfo[r.ingredient_id] = r.ingredients || null;
+  }
+  const ids = Array.from(idSet);
+  if (ids.length === 0) return [];
+
+  const cfgRes = await supabase
+    .from("ingredient_addon_config")
+    .select("ingredient_id, step_g, price_vnd_per_step, min_steps, max_steps, is_active")
+    .in("ingredient_id", ids as any[])
+    .eq("is_active", true);
+
+  if (cfgRes.error || !(cfgRes.data?.length)) return [];
+
+  return (cfgRes.data ?? []).map((row: any) => {
+    const info = ingredientInfo[row.ingredient_id] || {};
+    const step = Number(row.step_g ?? 20);
+    const f = step / 100;
+
+    const kcal100    = Number(info?.kcal_100g       ?? 0);
+    const protein100 = Number(info?.protein_g_100g  ?? 0);
+    const fat100     = Number(info?.fat_g_100g      ?? 0);
+    const carbs100   = Number(info?.carbs_g_100g    ?? 0);
+
+    const key = toBucketKey("ingredients", info?.image_path) || ING_DEFAULT_KEY;
+
+    return {
+      id: row.ingredient_id,
+      name: info?.name ?? "Nguyên liệu",
+      image_key: key,
+      amount_per_unit_g: step,
+      extra_price_vnd: Number(row.price_vnd_per_step ?? 0),
+      kcal_pu:   kcal100   * f,
+      protein_pu:protein100* f,
+      fat_pu:    fat100    * f,
+      carbs_pu:  carbs100  * f,
+      min_steps: row.min_steps ?? 0,
+      max_steps: row.max_steps ?? null,
+    } as Topping;
+  });
+}
+
 export default function DishDetail() {
-  const { id, name: nameParam, image: imageUrlFromList } =
-    useLocalSearchParams<{ id: string; name?: string; image?: string }>();
+  const { id, name: nameParam } =
+    useLocalSearchParams<{ id: string; name?: string }>();
   const dishId = Number(id);
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const [loading, setLoading] = useState(true);
   const [dish, setDish] = useState<DishRow | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(imageUrlFromList ?? null);
 
   const [toppings, setToppings] = useState<Topping[]>([]);
   const [counts, setCounts] = useState<Record<string | number, number>>({});
-  const [qty, setQty] = useState(1);
 
-  // cao hơn để tránh footer che nội dung
   const FOOTER_H = 96 + insets.bottom;
 
   useEffect(() => {
@@ -77,7 +199,7 @@ export default function DishDetail() {
       try {
         setLoading(true);
 
-        // 1) Load món (fallback nếu thiếu price_vnd)
+        // 1) món (lấy giá base)
         const colsWithPrice = "id,name,image_path,price_vnd";
         const colsNoPrice = "id,name,image_path";
         let d: any | null = null;
@@ -90,56 +212,87 @@ export default function DishDetail() {
 
         if (!alive) return;
         setDish(d);
-        if (!imageUrlFromList && d?.image_path && typeof d.image_path === "string" && d.image_path.startsWith("http")) {
-          setImageUrl(d.image_path);
-        }
 
-        // 2) Dinh dưỡng base 1 suất
+        // 2) dinh dưỡng base 1 suất (để lưu vào giỏ)
         const nutRes = await supabase
           .from("dish_nutrition_default")
           .select("kcal,protein,fat,carbs,serving_size_g")
           .eq("dish_id", dishId)
           .limit(1);
-        if (nutRes.error) throw nutRes.error;
-        const nut = nutRes.data?.[0] ?? null;
-        if (alive && nut) setDish((prev) => (prev ? { ...prev, ...nut } : prev));
+        if (!nutRes.error) {
+          const nut = nutRes.data?.[0] ?? null;
+          if (alive && nut) setDish((prev) => (prev ? { ...prev, ...nut } : prev));
+        }
 
-        // 3) Toppings (view per-step đã tính sẵn)
-        const topRes = await supabase
-          .from("v_dish_topping_options")
-          .select(`
-            ingredient_id,
-            name,
-            image_path,
-            step_g,
-            price_vnd_per_step,
-            kcal_per_step,
-            protein_per_step_g,
-            fat_per_step_g,
-            carbs_per_step_g,
-            min_steps,
-            max_steps
-          `)
-          .eq("dish_id", dishId);
-        if (topRes.error) throw topRes.error;
+        // 3) ADD-ON
+        let tops: Topping[] = [];
 
-        const tops: Topping[] = (topRes.data ?? []).map((row: any) => ({
-          id: row.ingredient_id,
-          name: row.name,
-          image_path: row.image_path ?? null,
-          amount_per_unit_g: Number(row.step_g ?? 0),
-          extra_price_vnd:   Number(row.price_vnd_per_step ?? 0),
-          kcal_pu:           Number(row.kcal_per_step ?? 0),
-          protein_pu:        Number(row.protein_per_step_g ?? 0),
-          fat_pu:            Number(row.fat_per_step_g ?? 0),
-          carbs_pu:          Number(row.carbs_per_step_g ?? 0),
-          min_steps:         row.min_steps,
-          max_steps:         row.max_steps,
-        }));
+        tops = await fetchAddonsFromConfig(dishId);
+
+        if (tops.length === 0) {
+          const v = await supabase
+            .from("v_dish_topping_options")
+            .select(`
+              ingredient_id,
+              name,
+              image_path,
+              step_g,
+              price_vnd_per_step,
+              kcal_per_step,
+              protein_per_step_g,
+              fat_per_step_g,
+              carbs_per_step_g,
+              min_steps,
+              max_steps
+            `)
+            .eq("dish_id", dishId);
+          if (!v.error && (v.data?.length ?? 0) > 0) {
+            tops = (v.data ?? []).map((row: any) => ({
+              id: row.ingredient_id,
+              name: row.name,
+              image_key: toBucketKey("ingredients", row.image_path) || ING_DEFAULT_KEY,
+              amount_per_unit_g: Number(row.step_g ?? 0),
+              extra_price_vnd:   Number(row.price_vnd_per_step ?? 0),
+              kcal_pu:           Number(row.kcal_per_step ?? 0),
+              protein_pu:        Number(row.protein_per_step_g ?? 0),
+              fat_pu:            Number(row.fat_per_step_g ?? 0),
+              carbs_pu:          Number(row.carbs_per_step_g ?? 0),
+              min_steps:         row.min_steps,
+              max_steps:         row.max_steps,
+            }));
+          }
+        }
+
+        if (tops.length === 0) {
+          const di = await supabase
+            .from("dish_ingredients")
+            .select(`
+              ingredient_id,
+              category,
+              min_steps,
+              max_steps,
+              step_g,
+              price_vnd_per_step,
+              ingredients:ingredients_nutrition(name,image_path)
+            `)
+            .eq("dish_id", dishId);
+          if (!di.error && (di.data?.length ?? 0) > 0) {
+            const rows2 = (di.data as any[]).filter(r => String(r?.category ?? "").toLowerCase() !== "base");
+            tops = rows2.map((row: any) => ({
+              id: row.ingredient_id,
+              name: row?.ingredients?.name ?? "Nguyên liệu",
+              image_key: toBucketKey("ingredients", row?.ingredients?.image_path) || ING_DEFAULT_KEY,
+              amount_per_unit_g: Number(row.step_g ?? 20),
+              extra_price_vnd:   Number(row.price_vnd_per_step ?? 0),
+              kcal_pu: 0, protein_pu: 0, fat_pu: 0, carbs_pu: 0,
+              min_steps: row.min_steps ?? 0,
+              max_steps: row.max_steps ?? null,
+            }));
+          }
+        }
 
         if (alive) {
           setToppings(tops);
-          // khởi tạo theo min_steps (nếu có), đảm bảo đồng bộ với giá hiển thị
           setCounts(Object.fromEntries(tops.map(t => [t.id, Math.max(0, t.min_steps ?? 0)])));
         }
       } catch (err: any) {
@@ -157,9 +310,8 @@ export default function DishDetail() {
     [toppings, counts]
   );
 
-  const basePrice = n0(dish?.price_vnd);              // GIÁ GỐC / 1 SUẤT
-  const pricePerDish = basePrice + extraPerDishVnd;    // gốc + addon
-  const finalPrice = pricePerDish * qty;
+  const basePrice = n0(dish?.price_vnd);
+  const pricePerDish = basePrice + extraPerDishVnd;
 
   const addedNutri = useMemo(
     () =>
@@ -183,12 +335,6 @@ export default function DishDetail() {
     fat:     n0(dish?.fat)     + addedNutri.fat,
     carbs:   n0(dish?.carbs)   + addedNutri.carbs,
   };
-  const totalNutriAll = {
-    kcal:    totalNutriPerDish.kcal    * qty,
-    protein: totalNutriPerDish.protein * qty,
-    fat:     totalNutriPerDish.fat     * qty,
-    carbs:   totalNutriPerDish.carbs   * qty,
-  };
 
   const incTop = (tid: string | number, max?: number | null) =>
     setCounts(prev => {
@@ -206,13 +352,9 @@ export default function DishDetail() {
       return { ...prev, [tid]: cur - 1 };
     });
 
-  const incQty = () => setQty(q => Math.min(99, q + 1));
-  const decQty = () => setQty(q => Math.max(1, q - 1));
-
   const doAddToCart = async () => {
     if (!dish) return;
 
-    // map topping -> format của lib/cart (extra_price_vnd_per_unit)
     const addons = toppings
       .map(t => {
         const units = counts[t.id] || 0;
@@ -237,17 +379,20 @@ export default function DishDetail() {
         dish_id: dish.id,
         name: dish.name,
         image_path: dish.image_path ?? null,
-        base_price_vnd: basePrice, // GIÁ GỐC / 1 SUẤT (không cộng topping)
-        qty,
-        addons,                    // [] nếu không chọn gì -> sẽ merge với dòng "không topping"
-        // snapshot dinh dưỡng / 1 suất (đã + addon)
+        base_price_vnd: basePrice,
+        qty: 1, // luôn 1 suất / lần thêm (đã bỏ nút cộng/trừ)
+        addons,
+        // snapshot dinh dưỡng / 1 suất
         kcal: totalNutriPerDish.kcal,
         protein: totalNutriPerDish.protein,
         fat: totalNutriPerDish.fat,
         carbs: totalNutriPerDish.carbs,
         serving_size_g: dish.serving_size_g ?? null,
+
+        // luôn tách thành dòng mới để người dùng tuỳ chỉnh add-on từng suất
+        no_merge: true,
       });
-      Alert.alert("Đã thêm vào giỏ", `${dish.name} (${qty}x)`);
+      Alert.alert("Đã thêm vào giỏ", dish.name);
       router.back();
     } catch (e: any) {
       Alert.alert("Lỗi", e?.message ?? "Không thể thêm vào giỏ");
@@ -269,15 +414,11 @@ export default function DishDetail() {
     );
   }
 
-  // 👉 nếu có giá ưu đãi thì set vào đây (vd 109000)
-  const wowPrice: number | null = null;
-
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      {/* Ẩn header mặc định */}
       <Stack.Screen options={{ headerShown: false }} />
 
-      {/* HEADER custom */}
+      {/* HEADER */}
       <View
         style={{
           paddingTop: insets.top + 6,
@@ -299,126 +440,93 @@ export default function DishDetail() {
         </Text>
       </View>
 
-      {/* Ảnh món */}
-      <View style={{ height: 220, backgroundColor: C.white }}>
-        <Image
-          source={imageUrl ? { uri: imageUrl } : undefined}
-          contentFit="cover"
-          style={{ width: "100%", height: "100%" }}
-          transition={200}
-        />
-      </View>
-
-      {/* Nội dung kéo được, không bị footer che */}
+      {/* NỘI DUNG: chỉ danh sách add-on */}
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{ padding: 16, paddingBottom: FOOTER_H + 40 }}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* Danh sách topping */}
         <View style={{ borderRadius: 12, overflow: "hidden", backgroundColor: C.white, borderWidth: 1, borderColor: C.line }}>
-          {toppings.map((t, idx) => {
-            const c = counts[t.id] || 0;
-            const gramsAdded   = c * t.amount_per_unit_g;
-            const kcalAdded    = c * t.kcal_pu;
-            const carbsAdded   = c * t.carbs_pu;
-            const fatAdded     = c * t.fat_pu;
-            const proteinAdded = c * t.protein_pu;
-            const moneyAdded   = c * t.extra_price_vnd;
+          {toppings.length === 0 ? (
+            <View style={{ padding: 14 }}>
+              <Text style={{ color: C.sub }}>Món này chưa có add-on.</Text>
+            </View>
+          ) : (
+            toppings.map((t, idx) => {
+              const c = counts[t.id] || 0;
+              const gramsAdded   = c * t.amount_per_unit_g;
+              const kcalAdded    = c * t.kcal_pu;
+              const carbsAdded   = c * t.carbs_pu;
+              const fatAdded     = c * t.fat_pu;
+              const proteinAdded = c * t.protein_pu;
+              const moneyAdded   = c * t.extra_price_vnd;
 
-            const last = idx === toppings.length - 1;
-            const canInc = t.max_steps == null || c < (t.max_steps as number);
-            const canDec = c > (t.min_steps ?? 0);
+              const last = idx === toppings.length - 1;
+              const canInc = t.max_steps == null || c < (t.max_steps as number);
+              const canDec = c > (t.min_steps ?? 0);
 
-            return (
-              <View key={String(t.id)} style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: last ? 0 : 1, borderColor: C.line, backgroundColor: "#FBF7F0" }}>
-                <View style={{ flexDirection: "row", alignItems: "center" }}>
-                  <View style={{ width: 56, height: 56, borderRadius: 10, overflow: "hidden", backgroundColor: C.white }}>
-                    {t.image_path ? (
-                      <Image
-                        source={t.image_path.startsWith("http") ? { uri: t.image_path } : undefined}
-                        contentFit="cover"
-                        style={{ width: "100%", height: "100%" }}
-                      />
-                    ) : null}
+              return (
+                <View key={String(t.id)} style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: last ? 0 : 1, borderColor: C.line, backgroundColor: "#FBF7F0" }}>
+                  <View style={{ flexDirection: "row", alignItems: "center" }}>
+                    <View style={{ width: 64, height: 64, borderRadius: 12, overflow: "hidden", backgroundColor: C.white }}>
+                      <AddonImg imageKey={t.image_key} />
+                    </View>
+
+                    <View style={{ flex: 1, marginHorizontal: 12 }}>
+                      <Text style={{ color: C.text, fontWeight: "600" }}>{t.name}</Text>
+                      <Text style={{ color: C.sub, marginTop: 2, fontSize: 12 }}>
+                        +{fmtVND(t.extra_price_vnd)}
+                        {t.amount_per_unit_g ? ` · ~${round1(t.amount_per_unit_g)}g` : ""}
+                        <> · {round1(t.kcal_pu)} kcal, {round1(t.carbs_pu)}g C, {round1(t.fat_pu)}g F, {round1(t.protein_pu)}g P</>
+                        {t.max_steps != null ? ` · tối đa ${t.max_steps} bước` : ""}
+                      </Text>
+                    </View>
+
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Pressable
+                        onPress={() => decTop(t.id, t.min_steps)}
+                        disabled={!canDec}
+                        style={{
+                          width: 36, height: 36, borderRadius: 8,
+                          backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
+                          alignItems: "center", justifyContent: "center", opacity: canDec ? 1 : 0.4,
+                        }}
+                      >
+                        <Ionicons name="remove" size={18} color={C.text} />
+                      </Pressable>
+                      <Text style={{ minWidth: 20, textAlign: "center", fontWeight: "700" }}>{c}</Text>
+                      <Pressable
+                        onPress={() => incTop(t.id, t.max_steps)}
+                        disabled={!canInc}
+                        style={{
+                          width: 36, height: 36, borderRadius: 8,
+                          backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
+                          alignItems: "center", justifyContent: "center", opacity: canInc ? 1 : 0.4,
+                        }}
+                      >
+                        <Ionicons name="add" size={18} color={C.text} />
+                      </Pressable>
+                    </View>
                   </View>
 
-                  <View style={{ flex: 1, marginHorizontal: 12 }}>
-                    <Text style={{ color: C.text, fontWeight: "600" }}>{t.name}</Text>
-                    <Text style={{ color: C.sub, marginTop: 2, fontSize: 12 }}>
-                      +{fmtVND(t.extra_price_vnd)}
-                      {t.amount_per_unit_g ? ` · ~${round1(t.amount_per_unit_g)}g` : ""}
-                      <> · {round1(t.kcal_pu)} kcal, {round1(t.carbs_pu)}g C, {round1(t.fat_pu)}g F, {round1(t.protein_pu)}g P</>
-                      {t.max_steps != null ? ` · tối đa ${t.max_steps} bước` : ""}
-                    </Text>
-                  </View>
-
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Pressable
-                      onPress={() => decTop(t.id, t.min_steps)}
-                      disabled={!canDec}
-                      style={{
-                        width: 36, height: 36, borderRadius: 8,
-                        backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                        alignItems: "center", justifyContent: "center", opacity: canDec ? 1 : 0.4,
-                      }}
-                    >
-                      <Ionicons name="remove" size={18} color={C.text} />
-                    </Pressable>
-                    <Text style={{ minWidth: 20, textAlign: "center", fontWeight: "700" }}>{c}</Text>
-                    <Pressable
-                      onPress={() => incTop(t.id, t.max_steps)}
-                      disabled={!canInc}
-                      style={{
-                        width: 36, height: 36, borderRadius: 8,
-                        backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                        alignItems: "center", justifyContent: "center", opacity: canInc ? 1 : 0.4,
-                      }}
-                    >
-                      <Ionicons name="add" size={18} color={C.text} />
-                    </Pressable>
-                  </View>
+                  {c > 0 && (
+                    <View style={{ marginTop: 6, marginLeft: 76 }}>
+                      <Text style={{ color: C.text, fontSize: 12 }}>
+                        Đã thêm: <Text style={{ fontWeight: "700" }}>{round1(gramsAdded)}g</Text>
+                        {" · "}+{round1(kcalAdded)} kcal · {round1(carbsAdded)}g C · {round1(fatAdded)}g F · {round1(proteinAdded)}g P
+                        {" · "}+{fmtVND(moneyAdded)}
+                      </Text>
+                    </View>
+                  )}
                 </View>
-
-                {c > 0 && (
-                  <View style={{ marginTop: 6, marginLeft: 68 }}>
-                    <Text style={{ color: C.text, fontSize: 12 }}>
-                      Đã thêm: <Text style={{ fontWeight: "700" }}>{round1(gramsAdded)}g</Text>
-                      {" · "}+{round1(kcalAdded)} kcal · {round1(carbsAdded)}g C · {round1(fatAdded)}g F · {round1(proteinAdded)}g P
-                      {" · "}+{fmtVND(moneyAdded)}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            );
-          })}
-        </View>
-
-        {/* Dinh dưỡng tổng */}
-        <View style={{ marginTop: 16 }}>
-          <Text style={{ color: C.sub, marginBottom: 6 }}>Dinh dưỡng ước tính</Text>
-          <View style={{ flexDirection: "row", gap: 16, flexWrap: "wrap" }}>
-            <Text style={{ color: C.text }}>
-              <Text style={{ fontWeight: "700" }}>{Math.round(totalNutriAll.kcal)}</Text> kcal
-            </Text>
-            <Text style={{ color: C.text }}>
-              <Text style={{ fontWeight: "700" }}>{round1(totalNutriAll.carbs)}</Text> g carbs
-            </Text>
-            <Text style={{ color: C.text }}>
-              <Text style={{ fontWeight: "700" }}>{round1(totalNutriAll.fat)}</Text> g fat
-            </Text>
-            <Text style={{ color: C.text }}>
-              <Text style={{ fontWeight: "700" }}>{round1(totalNutriAll.protein)}</Text> g protein
-            </Text>
-          </View>
-          <Text style={{ color: C.sub, marginTop: 4, fontSize: 12 }}>
-            (Cộng thêm từ add-on: {Math.round(addedNutri.kcal)} kcal, {round1(addedNutri.carbs)}g C, {round1(addedNutri.fat)}g F, {round1(addedNutri.protein)}g P)
-          </Text>
+              );
+            })
+          )}
         </View>
       </ScrollView>
 
-      {/* FOOTER: giá + qty + nút Thêm vào giỏ */}
+      {/* FOOTER (tổng tiền full-width, không bị …) */}
       <View
         style={{
           position: "absolute",
@@ -430,63 +538,30 @@ export default function DishDetail() {
           borderTopWidth: 1, borderColor: C.line,
         }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-          {/* Giá bên trái */}
-          <View style={{ flex: 1, paddingRight: 8 }}>
-            <Text style={{ fontSize: 16, fontWeight: "800", color: C.text }} numberOfLines={1}>
-              {fmtVND(finalPrice)} {qty > 1 ? `(${fmtVND(pricePerDish)} x ${qty})` : ""}
-            </Text>
-            {/* Giá ưu đãi nếu có */}
-            {/* {typeof wowPrice === "number" && (
-              <Text style={{ fontSize: 12, color: "#6b7280", fontStyle: "italic" }} numberOfLines={1}>
-                {fmtVND(wowPrice)} (WOWCARE)
-              </Text>
-            )} */}
-          </View>
-
-          {/* Qty stepper */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Pressable
-              onPress={decQty}
-              style={{
-                width: 36, height: 36, borderRadius: 8,
-                backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                alignItems: "center", justifyContent: "center",
-              }}
-            >
-              <Ionicons name="remove" size={18} color={C.text} />
-            </Pressable>
-            <Text style={{ minWidth: 24, textAlign: "center", fontWeight: "800", color: C.text }}>{qty}</Text>
-            <Pressable
-              onPress={incQty}
-              style={{
-                width: 36, height: 36, borderRadius: 8,
-                backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                alignItems: "center", justifyContent: "center",
-              }}
-            >
-              <Ionicons name="add" size={18} color={C.text} />
-            </Pressable>
-          </View>
-
-          {/* Nút thêm vào giỏ */}
-          <Pressable
-            onPress={doAddToCart}
-            style={{
-              paddingVertical: 12,
-              paddingHorizontal: 18,
-              backgroundColor: C.accent,
-              borderRadius: 20,
-              minWidth: 170,
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <Text style={{ color: C.white, fontWeight: "700" }} numberOfLines={1}>
-              Thêm vào giỏ hàng
-            </Text>
-          </Pressable>
+        {/* Tổng tiền: 1 dòng riêng, full-width */}
+        <View style={{ marginBottom: 8 }}>
+          <Text style={{ fontSize: 18, fontWeight: "800", color: C.text }}>
+            {fmtVND(pricePerDish)}
+          </Text>
         </View>
+
+        {/* Nút thêm giỏ — không có nút cộng/trừ số lượng */}
+        <Pressable
+          onPress={doAddToCart}
+          style={{
+            width: "100%",
+            paddingVertical: 12,
+            paddingHorizontal: 18,
+            backgroundColor: C.accent,
+            borderRadius: 20,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ color: C.white, fontWeight: "700" }}>
+            Thêm vào giỏ hàng
+          </Text>
+        </Pressable>
       </View>
     </View>
   );

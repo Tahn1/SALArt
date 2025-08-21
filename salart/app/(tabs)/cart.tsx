@@ -1,155 +1,130 @@
-// app/(tabs)/cart.tsx — CartScreen (RPC create_order + v_dish_available)
+// app/(tabs)/cart.tsx — CartScreen (Floating CTA, addon chips with +/- & 'Xoá', no dish qty controls)
 
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  Alert,
-  ActivityIndicator,
-  FlatList,
-  Pressable,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { Alert, ActivityIndicator, FlatList, Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { supabase } from "../../lib/supabase";
 import {
   useCart,
-  setLineQty,
   removeLine,
-  clearCart,
-  CartItem,
-  lineSubtotalVnd,
+  removeAddon,
+  setAddonQty,
 } from "../../lib/cart";
 
-type AvailRow = { dish_id: number; available_servings: number };
+const C = {
+  bg: "#F6F2EA",
+  panel: "#FFFFFF",
+  text: "#111827",
+  sub: "#6B7280",
+  line: "#E5E7EB",
+  good: "#16a34a",
+  goodDark: "#15803d",
+  danger: "#dc2626",
+};
 
-const fmtVnd = (n: number) => (n || 0).toLocaleString("vi-VN") + "₫";
+const fmtVnd = (n = 0) => {
+  try { return n.toLocaleString("vi-VN") + " đ"; }
+  catch { return `${Math.round(n)} đ`; }
+};
+
+type AvailRow = { dish_id: number; available_servings: number | null };
 
 export default function CartScreen() {
+  const insets = useSafeAreaInsets();
+  const tabH = useBottomTabBarHeight();
   const { items, totalQty, totalVnd } = useCart();
-  // limits[dish_id] = số suất còn làm được; null = không giới hạn/không kiểm
+
   const [limits, setLimits] = useState<Record<number, number | null>>({});
   const [loading, setLoading] = useState(false);
   const [placing, setPlacing] = useState(false);
-  const [note, setNote] = useState("");
-  const insets = useSafeAreaInsets();
 
-  // ---- Load giới hạn từ view v_dish_available
-  async function loadLimits(forItems: CartItem[]) {
-    if (!forItems.length) {
-      setLimits({});
-      return;
+  const qtyByDish = useMemo(() => {
+    const map: Record<number, number> = {};
+    for (const it of items) map[it.dish_id] = (map[it.dish_id] ?? 0) + it.qty;
+    return map;
+  }, [items]);
+
+  const overCapacity = useMemo(() => {
+    for (const d of Object.keys(qtyByDish)) {
+      const id = Number(d);
+      const limit = limits[id];
+      if (limit != null && qtyByDish[id] > limit) return true;
     }
-    const ids = [...new Set(forItems.map((i) => i.dish_id))];
+    return false;
+  }, [qtyByDish, limits]);
 
+  const lineSubtotal = (it: any) =>
+    (it.base_price_vnd +
+      (it.addons ?? []).reduce(
+        (s: number, a: any) => s + a.qty_units * a.extra_price_vnd_per_unit,
+        0
+      )) * it.qty;
+
+  async function loadLimits() {
+    const dishIds = Array.from(new Set(items.map((i) => i.dish_id)));
+    if (dishIds.length === 0) { setLimits({}); return; }
     const { data, error } = await supabase
       .from("v_dish_available")
-      .select("dish_id, available_servings")
-      .in("dish_id", ids);
-
-    if (error) {
-      // Nếu view chưa sẵn → cho phép thao tác bình thường; backend RPC vẫn chặn oversell.
-      const map: Record<number, number | null> = {};
-      ids.forEach((id) => (map[id] = null));
-      setLimits(map);
-      return;
-    }
+      .select("dish_id,available_servings")
+      .in("dish_id", dishIds as any[]);
+    if (error) { setLimits({}); return; }
     const map: Record<number, number | null> = {};
-    (data as AvailRow[]).forEach((r) => (map[r.dish_id] = r.available_servings ?? 0));
+    (data as AvailRow[]).forEach((r) => (map[r.dish_id] = r.available_servings));
     setLimits(map);
   }
 
   useEffect(() => {
     setLoading(true);
-    loadLimits(items).finally(() => setLoading(false));
-  }, [items]);
+    loadLimits().finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
 
-  // Tổng số suất mỗi món (cộng across lines)
-  const qtyByDish = useMemo(() => {
-    const m: Record<number, number> = {};
-    items.forEach((it) => (m[it.dish_id] = (m[it.dish_id] ?? 0) + it.qty));
-    return m;
-  }, [items]);
-
-  function inc(it: CartItem) {
-    const limit = limits[it.dish_id]; // null = không giới hạn/không kiểm
-    const sum = qtyByDish[it.dish_id] ?? 0;
-    if (limit != null && sum + 1 > limit) {
-      Alert.alert("Vượt giới hạn", `Chỉ còn làm được ${limit} suất cho món này.`);
-      return;
-    }
-    setLineQty(it.line_id, it.qty + 1);
-  }
-  function dec(it: CartItem) {
-    if (it.qty <= 1) return removeLine(it.line_id);
-    setLineQty(it.line_id, it.qty - 1);
-  }
-
-  function addonsLabel(it: CartItem) {
-    if (!it.addons || it.addons.length === 0) return "Không topping";
-    return it.addons.map((a) => `${a.name}×${a.qty_units}`).join(", ");
-  }
-
-  // ---- Đặt hàng qua RPC create_order (transaction trong DB)
   async function placeOrder() {
-    if (items.length === 0) {
-      Alert.alert("Giỏ hàng trống", "Hãy thêm món trước khi đặt.");
-      return;
-    }
-    // Kiểm tra sơ bộ theo giới hạn UI (backend vẫn kiểm tra lần cuối)
-    for (const [dishIdStr, sumQty] of Object.entries(qtyByDish)) {
-      const dishId = Number(dishIdStr);
-      const limit = limits[dishId];
-      if (limit != null && sumQty > limit) {
-        Alert.alert(
-          "Hết hàng",
-          `Một số dòng của món #${dishId} vượt giới hạn ${limit}. Hãy giảm số lượng.`
-        );
-        return;
-      }
-    }
+    if (items.length === 0) return;
+    if (overCapacity) { Alert.alert("Vượt công suất","Một số món vượt số suất còn lại."); return; }
 
+    setPlacing(true);
     try {
-      setPlacing(true);
-      const payload = {
-        p_note: note.trim() || null,
-        p_lines: items.map((i) => ({
-          line_id: i.line_id,
-          dish_id: i.dish_id,
-          qty: i.qty,
-          addons: (i.addons ?? []).map((a) => ({ id: a.id, qty_units: a.qty_units })),
+      const p_lines = items.map((it) => ({
+        dish_id: it.dish_id,
+        qty: it.qty,
+        addons: (it.addons ?? []).map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          qty_units: a.qty_units,
+          extra_price_vnd_per_unit: a.extra_price_vnd_per_unit,
         })),
-        // p_user: session?.user?.id, // nếu muốn lưu user_id
-      } as any;
-
-      const { data, error } = await supabase.rpc("create_order", payload);
+      }));
+      const { data, error } = await supabase.rpc("create_order", { p_note: null, p_lines });
       if (error) throw error;
-
-      const orderId = data as number;
-      clearCart();
-      Alert.alert("Đặt thành công", `Mã đơn: ${orderId}`);
+      const orderId = Number(data);
+      Alert.alert("Đặt hàng thành công", `Mã đơn #${orderId}\nCảm ơn bạn!`);
     } catch (e: any) {
-      const msg = String(e?.message || e);
-      if (msg.includes("OUT_OF_STOCK")) {
-        Alert.alert("Hết nguyên liệu", "Một số nguyên liệu hiện không đủ để chế biến.");
-      } else if (msg.includes("OUT_OF_CAPACITY")) {
-        Alert.alert("Hết công suất", "Một số món đã hết suất còn lại trong ca.");
-      } else {
-        Alert.alert("Đặt thất bại", e?.message ?? "Vui lòng thử lại.");
-      }
-    } finally {
-      setPlacing(false);
-    }
+      const msg = String(e?.message ?? "");
+      if (msg.includes("OUT_OF_STOCK")) Alert.alert("Hết hàng","Một số nguyên liệu đã hết.");
+      else if (msg.includes("OUT_OF_CAPACITY")) Alert.alert("Vượt công suất","Số lượng vượt suất còn lại.");
+      else if (msg.includes("EMPTY_CART")) Alert.alert("Giỏ trống","Không có gì để đặt.");
+      else Alert.alert("Đặt thất bại", e?.message ?? "Vui lòng thử lại.");
+    } finally { setPlacing(false); }
   }
+
+  const canPlace = items.length > 0 && !overCapacity && !placing;
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#fff", paddingBottom: insets.bottom || 12 }}>
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: C.bg,
+        paddingBottom: (insets.bottom || 12) + tabH + 90, // chừa chỗ cho tab + nút nổi
+      }}
+    >
       {/* Header */}
-      <View style={{ padding: 16 }}>
-        <Text style={{ fontSize: 22, fontWeight: "800", color: "#111827" }}>Giỏ hàng</Text>
-        <Text style={{ color: "#6b7280", marginTop: 4 }}>
-          Tổng món: <Text style={{ fontWeight: "800" }}>{totalQty}</Text> · Tổng tiền:{" "}
-          <Text style={{ fontWeight: "800" }}>{fmtVnd(totalVnd)}</Text>
+      <View style={{ padding: 16, backgroundColor: C.panel, borderBottomWidth: 1, borderColor: C.line }}>
+        <Text style={{ fontSize: 22, fontWeight: "800", color: C.text }}>Giỏ hàng</Text>
+        <Text style={{ color: C.sub, marginTop: 4 }}>
+          Tổng món: <Text style={{ fontWeight: "800", color: C.text }}>{totalQty}</Text> · Tổng tiền:{" "}
+          <Text style={{ fontWeight: "800", color: C.text }}>{fmtVnd(totalVnd)}</Text>
         </Text>
       </View>
 
@@ -161,82 +136,151 @@ export default function CartScreen() {
       ) : (
         <FlatList
           data={items}
-          keyExtractor={(it) => it.line_id}
+          keyExtractor={(it: any) => it.line_id}
           contentContainerStyle={{ padding: 16, paddingBottom: 28 }}
-          ListEmptyComponent={
-            <Text style={{ textAlign: "center", color: "#6b7280" }}>Giỏ hàng trống</Text>
-          }
-          renderItem={({ item }) => {
-            const limit = limits[item.dish_id]; // null = không giới hạn/không kiểm
-            const sumForDish = qtyByDish[item.dish_id] ?? 0;
-            const warn = limit != null && sumForDish > limit;
-            const subtotal = lineSubtotalVnd(item);
+          ListEmptyComponent={<Text style={{ textAlign: "center", color: C.sub }}>Giỏ hàng trống</Text>}
+          renderItem={({ item }: any) => {
+            const addons = item.addons ?? [];
+            const subtotal = lineSubtotal(item);
+            const limit = limits[item.dish_id];
+            const sumQtyDish = qtyByDish[item.dish_id] ?? item.qty;
+            const exceed = limit != null && sumQtyDish > limit;
+
             return (
               <View
                 style={{
+                  padding: 12,
                   borderWidth: 1,
-                  borderColor: warn ? "#fca5a5" : "#e5e7eb",
+                  borderColor: C.line,
+                  borderRadius: 12,
                   backgroundColor: "#fff",
-                  borderRadius: 16,
-                  padding: 14,
                   marginBottom: 12,
+                  gap: 8,
                 }}
               >
-                <Text style={{ fontSize: 16, fontWeight: "800", color: "#111827" }}>
-                  {item.name}
-                </Text>
-                <Text style={{ color: "#6b7280", marginTop: 4 }}>{addonsLabel(item)}</Text>
-                <Text style={{ marginTop: 4, color: warn ? "#b91c1c" : "#6b7280" }}>
-                  Còn làm được:{" "}
-                  <Text style={{ fontWeight: "800" }}>
-                    {limit == null ? "không giới hạn" : limit}
-                  </Text>
-                  {limit != null ? " suất" : ""} · Đang đặt:{" "}
-                  <Text style={{ fontWeight: "800" }}>{sumForDish}</Text>
-                  {warn ? " • Vượt giới hạn!" : ""}
-                </Text>
-
-                {/* Qty controls */}
-                <View style={{ flexDirection: "row", alignItems: "center", marginTop: 10, gap: 10 }}>
-                  <Pressable
-                    onPress={() => dec(item)}
-                    style={{
-                      width: 40, height: 40,
-                      alignItems: "center", justifyContent: "center",
-                      borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb",
-                      backgroundColor: "#f9fafb",
-                    }}
-                  >
-                    <Text style={{ fontSize: 18, fontWeight: "800" }}>–</Text>
-                  </Pressable>
-                  <Text style={{ minWidth: 32, textAlign: "center", fontWeight: "800" }}>
-                    {item.qty}
-                  </Text>
-                  <Pressable
-                    onPress={() => inc(item)}
-                    style={{
-                      width: 40, height: 40,
-                      alignItems: "center", justifyContent: "center",
-                      borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb",
-                      backgroundColor: "#f3f4f6",
-                    }}
-                  >
-                    <Text style={{ fontSize: 18, fontWeight: "800" }}>+</Text>
-                  </Pressable>
-
-                  <View style={{ flex: 1 }} />
-                  <Text style={{ fontWeight: "700", color: "#374151", marginRight: 8 }}>
+                {/* Hàng tiêu đề món + qty badge + subtotal */}
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <View style={{ flex: 1, flexDirection: "row", alignItems: "center" }}>
+                    <Text style={{ fontSize: 16, fontWeight: "700", color: C.text }}>
+                      {item.name}
+                    </Text>
+                    {item.qty > 1 && (
+                      <View
+                        style={{
+                          marginLeft: 8,
+                          paddingHorizontal: 8,
+                          paddingVertical: 2,
+                          borderRadius: 999,
+                          backgroundColor: "#F3F4F6",
+                          borderWidth: 1,
+                          borderColor: C.line,
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: C.text }}>
+                          × {item.qty}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={{ fontWeight: "800", color: C.text }}>
                     {fmtVnd(subtotal)}
                   </Text>
+                </View>
+
+                {/* Add-ons: chip có +/- và nút chữ 'Xoá' (không hiển thị giá) */}
+                {addons.length === 0 ? (
+                  <Text style={{ color: C.sub }}>Không có add-on</Text>
+                ) : (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+                    {addons.map((a: any) => (
+                      <View
+                        key={`${item.line_id}-${a.id}`}
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          paddingHorizontal: 10,
+                          paddingVertical: 6,
+                          borderRadius: 999,
+                          borderWidth: 1,
+                          borderColor: C.line,
+                          backgroundColor: "#fff",
+                          marginRight: 6,
+                          marginBottom: 6,
+                          gap: 6,
+                        }}
+                      >
+                        <Text style={{ color: C.text, fontSize: 12, fontWeight: "700" }}>
+                          {a.name}
+                        </Text>
+
+                        {/* Counter cho add-on */}
+                        <View style={{ flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: C.line, borderRadius: 8 }}>
+                          <Pressable
+                            onPress={() => setAddonQty(item.line_id, a.id, Math.max(0, a.qty_units - 1))}
+                            style={{ paddingHorizontal: 6, paddingVertical: 2 }}
+                          >
+                            <Text style={{ fontSize: 12, fontWeight: "800", color: C.text }}>–</Text>
+                          </Pressable>
+                          <Text style={{ minWidth: 18, textAlign: "center", fontWeight: "800", color: C.text, fontSize: 12 }}>
+                            {a.qty_units}
+                          </Text>
+                          <Pressable
+                            onPress={() => setAddonQty(item.line_id, a.id, Math.min(99, a.qty_units + 1))}
+                            style={{ paddingHorizontal: 6, paddingVertical: 2 }}
+                          >
+                            <Text style={{ fontSize: 12, fontWeight: "800", color: C.text }}>+</Text>
+                          </Pressable>
+                        </View>
+
+                        {/* Nút chữ 'Xoá' thay cho icon × */}
+                        <Pressable
+                          onPress={() => removeAddon(item.line_id, a.id)}
+                          style={{
+                            paddingHorizontal: 8,
+                            paddingVertical: 4,
+                            borderRadius: 8,
+                            backgroundColor: "#fee2e2",
+                            borderWidth: 1,
+                            borderColor: "#fecaca",
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#b91c1c" }}>Xoá</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {limit == null ? (
+                  <Text style={{ color: C.sub, fontSize: 12 }}>
+                    Công suất: <Text style={{ fontWeight: "700" }}>không giới hạn</Text>
+                  </Text>
+                ) : (
+                  <Text
+                    style={{
+                      color: exceed ? C.danger : C.sub,
+                      fontSize: 12,
+                      fontWeight: (exceed ? "700" : "400") as any,
+                    }}
+                  >
+                    Còn: {limit} suất · Bạn đang đặt: {sumQtyDish}
+                  </Text>
+                )}
+
+                {/* Chỉ giữ nút Xoá món */}
+                <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
                   <Pressable
                     onPress={() => removeLine(item.line_id)}
                     style={{
-                      paddingHorizontal: 12, paddingVertical: 8,
-                      borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb",
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      borderColor: C.line,
                       backgroundColor: "#fff",
                     }}
                   >
-                    <Text style={{ fontWeight: "700", color: "#374151" }}>Xoá</Text>
+                    <Text style={{ color: C.text, fontWeight: "700" }}>Xoá món</Text>
                   </Pressable>
                 </View>
               </View>
@@ -245,46 +289,40 @@ export default function CartScreen() {
         />
       )}
 
-      {/* Note + actions */}
-      <View style={{ padding: 16, borderTopWidth: 1, borderColor: "#e5e7eb" }}>
-        <Text style={{ color: "#374151", marginBottom: 6 }}>Ghi chú (tuỳ chọn)</Text>
-        <TextInput
-          value={note}
-          onChangeText={setNote}
-          placeholder="Ví dụ: ít sốt, thêm tiêu…"
-          placeholderTextColor="#9ca3af"
+      {/* CTA nổi: sát tab bar, hiển thị tổng tiền trên nút */}
+      <View
+        pointerEvents="box-none"
+        style={{
+          position: "absolute",
+          left: 16,
+          right: 16,
+          bottom: tabH + 12,
+        }}
+      >
+        <Pressable
+          disabled={!canPlace}
+          onPress={placeOrder}
           style={{
-            borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 12,
-            paddingHorizontal: 12, paddingVertical: 10, marginBottom: 12, color: "#111827",
+            paddingVertical: 14,
+            borderRadius: 16,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: canPlace ? C.good : "#9ca3af",
+            elevation: 5,
+            shadowColor: "#000",
+            shadowOpacity: 0.15,
+            shadowRadius: 10,
+            shadowOffset: { width: 0, height: 4 },
           }}
-        />
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <Pressable
-            onPress={clearCart}
-            style={{
-              flex: 1, alignItems: "center", paddingVertical: 12,
-              borderRadius: 12, borderWidth: 1, borderColor: "#e5e7eb", backgroundColor: "#fff",
-            }}
-          >
-            <Text style={{ fontWeight: "800", color: "#111827" }}>Xoá giỏ</Text>
-          </Pressable>
-          <Pressable
-            disabled={placing || items.length === 0}
-            onPress={placeOrder}
-            style={{
-              flex: 1, alignItems: "center", paddingVertical: 12, borderRadius: 12,
-              backgroundColor: items.length === 0 ? "#9ca3af" : "#16a34a",
-              borderWidth: 1, borderColor: items.length === 0 ? "#9ca3af" : "#15803d",
-              opacity: placing ? 0.8 : 1,
-            }}
-          >
-            {placing ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={{ fontWeight: "800", color: "#fff" }}>Đặt ngay</Text>
-            )}
-          </Pressable>
-        </View>
+        >
+          {placing ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={{ color: "#fff", fontWeight: "800", fontSize: 16 }}>
+              Đặt ngay — {fmtVnd(totalVnd)}
+            </Text>
+          )}
+        </Pressable>
       </View>
     </View>
   );

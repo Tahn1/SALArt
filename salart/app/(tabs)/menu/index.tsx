@@ -5,12 +5,11 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../../../lib/supabase";
-import { addToCart } from "../../../lib/cart";
 import { Image } from "expo-image";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { FlashList } from "@shopify/flash-list";
-import { router } from "expo-router"; // ✅ thêm để điều hướng sang chi tiết
+import { router } from "expo-router"; // điều hướng sang chi tiết
 
 type Dish = {
   id: number;
@@ -41,10 +40,39 @@ const DPR        = Math.min(2, PixelRatio.get()); // 2x là đủ đẹp
 const SCALE_DOWN = 0.72;                  // xin ảnh nhỏ hơn -> upsample nhẹ => mờ mờ, đỡ lag
 const LQIP_W     = 24;                    // placeholder siêu nhỏ để hiện ngay
 
-// ===== Helpers build URL (ưu tiên WebP, fallback JPEG/PNG) =====
-function buildUrl(path: string, opts: { w: number; q: number; resize: "cover" | "contain"; webp?: boolean }) {
-  const safePath = path.replace(/^dishes\/dishes\//, "dishes/");
-  return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(safePath, {
+// ======= CHỈNH PHẦN ẢNH (QUAN TRỌNG) =======
+// Nhận diện URL public/signed Supabase cho bucket hiện tại
+const SUPA_PUBLIC_RE = new RegExp(`^https?://[^?]+/storage/v1/object/public/${IMAGE_BUCKET}/`, "i");
+const SUPA_SIGN_RE   = new RegExp(`^https?://[^?]+/storage/v1/object/sign/${IMAGE_BUCKET}/`, "i");
+
+// Chuẩn hoá giá trị DB -> key trong bucket
+function toBucketKey(p?: string | null) {
+  let key = String(p || "").trim();
+  if (!key) return "";
+
+  // Nếu là URL Supabase thì cắt prefix để lấy key
+  key = key.replace(SUPA_PUBLIC_RE, "").replace(SUPA_SIGN_RE, "");
+  // Bỏ "/" đầu
+  key = key.replace(/^\/+/, "");
+
+  // Nếu chỉ là tên file (không có "/") -> mặc định nằm trong thư mục "dishes/"
+  if (!key.includes("/")) key = `dishes/${key}`;
+
+  // Nếu lỡ lặp "dishes/dishes/..." -> gom lại thành "dishes/..."
+  key = key.replace(/^dishes\/(?:dishes\/)+/i, "dishes/");
+
+  return key;
+}
+
+// Helpers build URL — LUÔN dùng key trong bucket
+function buildUrl(
+  path: string,
+  opts: { w: number; q: number; resize: "cover" | "contain"; webp?: boolean }
+) {
+  const key = toBucketKey(path);
+  if (!key) return FALLBACK;
+
+  return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(key, {
     transform: {
       width: opts.w,
       quality: opts.q,
@@ -77,6 +105,16 @@ function fmt1(x?: number | null) {
   return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toFixed(1);
 }
 
+// ======= Swap tiện dụng: đổi vị trí 2 và 3 theo yêu cầu =======
+const SWAP_PAIR_IDX: [number, number] = [1, 2]; // 0-based: vị trí thứ 2 và 3
+
+function swapByIndex<T>(arr: T[], [i, j]: [number, number]) {
+  if (i < 0 || j < 0 || i >= arr.length || j >= arr.length) return arr;
+  const next = arr.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
 export default function MenuScreen() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<(typeof CHIP_ITEMS)[number]>("Nổi bật");
@@ -95,27 +133,41 @@ export default function MenuScreen() {
     return () => clearTimeout(t);
   }, [query]);
 
-  const addOneToCart = useCallback((item: Dish) => {
-    addToCart(item.id, item.name, 1);
-    Alert.alert("Đã thêm vào giỏ", `${item.name} ×1`);
-  }, []);
-
   const load = useCallback(async () => {
     try {
       setLoading(true);
 
-      // 1) dishes + 2) ingredients (song song)
-      const [dishesRes, ingRes] = await Promise.all([
-        supabase.from("dishes").select("id,name,image_path").order("name"),
-        supabase
-          .from("dish_ingredients")
-          .select("dish_id, category, ingredients:ingredients_nutrition(name)")
-          .order("dish_id"),
-      ]);
-      if (dishesRes.error) throw dishesRes.error;
+      // 1) dishes (ưu tiên display_order), 2) ingredients
+      let dishes: any[] = [];
+      const colsWithOrder = "id,name,image_path,display_order";
+      const colsFallback  = "id,name,image_path";
+
+      const d1 = await supabase
+        .from("dishes")
+        .select(colsWithOrder)
+        .order("display_order", { ascending: true, nullsFirst: false })
+        .order("id", { ascending: true });
+
+      if (d1.error && (d1.error.message || "").toLowerCase().includes("display_order")) {
+        const d2 = await supabase
+          .from("dishes")
+          .select(colsFallback)
+          .order("id", { ascending: true });
+        if (d2.error) throw d2.error;
+        dishes = d2.data ?? [];
+      } else if (d1.error) {
+        throw d1.error;
+      } else {
+        dishes = d1.data ?? [];
+      }
+
+      const ingRes = await supabase
+        .from("dish_ingredients")
+        .select("dish_id, category, ingredients:ingredients_nutrition(name)")
+        .order("dish_id");
+
       if (ingRes.error) throw ingRes.error;
 
-      const dishes = dishesRes.data ?? [];
       const ing = ingRes.data ?? [];
 
       // nhóm base/topping
@@ -152,7 +204,7 @@ export default function MenuScreen() {
         }
       }
 
-      const next = dishes.map((d: any) => ({
+      let next: Dish[] = dishes.map((d: any) => ({
         id: d.id,
         name: d.name,
         image_path: d.image_path as string | null | undefined,
@@ -164,6 +216,11 @@ export default function MenuScreen() {
         fat:    nutriMap[d.id]?.fat    ?? null,
         carbs:  nutriMap[d.id]?.carbs  ?? null,
       }));
+
+      // 👉 YÊU CẦU: đổi chỗ món vị trí 2 và 3 trong UI
+      if (next.length >= 3) {
+        next = swapByIndex(next, SWAP_PAIR_IDX);
+      }
 
       setItems(next);
 
@@ -194,8 +251,8 @@ export default function MenuScreen() {
   }, [debouncedQ, items, filter]);
 
   const renderItem = useCallback(
-    ({ item }: { item: Dish }) => <MenuCard item={item} onAdd={addOneToCart} />,
-    [addOneToCart]
+    ({ item }: { item: Dish }) => <MenuCard item={item} />,
+    []
   );
   const keyExtractor = useCallback((it: Dish) => String(it.id), []);
 
@@ -278,20 +335,15 @@ const ImgWithFallback = ({ path, recyclingKey }: { path?: string | null; recycli
   );
 };
 
-// ✅ SỬA: bọc toàn bộ card bằng Pressable để mở màn chi tiết
-const MenuCard = memo(function MenuCard({
-  item, onAdd,
-}: {
-  item: Dish;
-  onAdd: (it: Dish) => void;
-}) {
+// Card bấm để mở chi tiết
+const MenuCard = memo(function MenuCard({ item }: { item: Dish }) {
   const openDetail = () => {
     router.push({
-      pathname: "/menu/[id]",                    // không có (tabs)
+      pathname: "/menu/[id]",
       params: {
         id: String(item.id),
         name: item.name,
-        image: urlMainWebp(item.image_path),     // truyền sẵn URL ảnh đã transform
+        image: urlMainWebp(item.image_path), // truyền sẵn URL ảnh đã transform
       },
     });
   };
@@ -336,7 +388,7 @@ const MenuCard = memo(function MenuCard({
         )}
       </View>
 
-      {/* Ảnh: LQIP + WebP ưu tiên + fallback (contain) */}
+      {/* Ảnh */}
       <View style={{ backgroundColor: BG, paddingHorizontal: PAD, paddingBottom: 12 }}>
         <ImgWithFallback path={item.image_path} recyclingKey={String(item.id)} />
       </View>
@@ -350,16 +402,6 @@ const MenuCard = memo(function MenuCard({
         {typeof item.carbs === "number"   && <Pill label={`C ${fmt1(item.carbs)}g`} />}
         {typeof item.fat === "number"     && <Pill label={`F ${fmt1(item.fat)}g`} />}
         {typeof item.protein === "number" && <Pill label={`P ${fmt1(item.protein)}g`} />}
-      </View>
-
-      {/* Nút thêm vào giỏ: vẫn hoạt động độc lập */}
-      <View style={{ paddingHorizontal: PAD, paddingBottom: PAD, flexDirection:"row", justifyContent:"flex-end" }}>
-        <Pressable
-          onPress={() => onAdd(item)}
-          style={{ backgroundColor: "#1f2937", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 }}
-        >
-          <Text style={{ color: "#fff", fontWeight: "800" }}>Thêm vào giỏ</Text>
-        </Pressable>
       </View>
     </Pressable>
   );
