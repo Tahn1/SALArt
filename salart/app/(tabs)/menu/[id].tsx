@@ -20,6 +20,9 @@ type DishRow = {
   fat?: number | null;
   carbs?: number | null;
   serving_size_g?: number | null;
+  // ==== NEW: fallback theo bảng dishes ====
+  stock_mode?: "ING" | "DISH" | null;
+  stock_units?: number | null;
 };
 
 type Topping = {
@@ -34,6 +37,9 @@ type Topping = {
   carbs_pu: number;
   min_steps?: number | null;
   max_steps?: number | null;
+  // ==== NEW: tồn kho & số bước khả dụng theo kho ====
+  stock_g?: number;             // gram còn lại của nguyên liệu
+  avail_steps?: number;         // floor(stock_g / step_g)
 };
 
 const C = {
@@ -150,6 +156,7 @@ async function fetchAddonsFromConfig(dishId: number): Promise<Topping[]> {
 
   if (cfgRes.error || !(cfgRes.data?.length)) return [];
 
+  // (chưa gắn stock ở đây — sẽ gắn ở component sau khi gom đủ list)
   return (cfgRes.data ?? []).map((row: any) => {
     const info = ingredientInfo[row.ingredient_id] || {};
     const step = Number(row.step_g ?? 20);
@@ -191,7 +198,57 @@ export default function DishDetail() {
   const [toppings, setToppings] = useState<Topping[]>([]);
   const [counts, setCounts] = useState<Record<string | number, number>>({});
 
+  // NEW: tồn kho món & flag “món có ô add-on không”
+  const [dishAvail, setDishAvail] = useState<number | null>(null);
+  const [hadAddonSlots, setHadAddonSlots] = useState<boolean>(false);
+
   const FOOTER_H = 96 + insets.bottom;
+
+  // Lấy tồn kho món từ v_dish_available
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("v_dish_available")
+          .select("dish_id,available_servings")
+          .eq("dish_id", dishId)
+          .limit(1);
+        if (!alive) return;
+        if (!error && (data?.length ?? 0) > 0) {
+          setDishAvail(data![0].available_servings ?? null);
+        } else {
+          setDishAvail(null); // null = không giới hạn
+        }
+      } catch {
+        if (alive) setDishAvail(null);
+      }
+    })();
+    return () => { alive = false; };
+  }, [dishId]);
+
+  // Kiểm tra món có “ô add-on” hay không (khác món vốn không có add-on)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("dish_ingredients")
+          .select("category")
+          .eq("dish_id", dishId);
+        if (!alive) return;
+        if (!error) {
+          const has = (data ?? []).some((r: any) => String(r?.category ?? "").toLowerCase() !== "base");
+          setHadAddonSlots(has);
+        } else {
+          setHadAddonSlots(false);
+        }
+      } catch {
+        if (alive) setHadAddonSlots(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [dishId]);
 
   useEffect(() => {
     let alive = true;
@@ -199,9 +256,9 @@ export default function DishDetail() {
       try {
         setLoading(true);
 
-        // 1) món (lấy giá base)
-        const colsWithPrice = "id,name,image_path,price_vnd";
-        const colsNoPrice = "id,name,image_path";
+        // 1) món (lấy giá base) + ==== NEW: lấy stock_mode, stock_units để fallback ====
+        const colsWithPrice = "id,name,image_path,price_vnd,stock_mode,stock_units";
+        const colsNoPrice   = "id,name,image_path,stock_mode,stock_units";
         let d: any | null = null;
         const r1 = await supabase.from("dishes").select(colsWithPrice).eq("id", dishId).single();
         if (r1.error && (r1.error.message || "").includes("price_vnd")) {
@@ -224,7 +281,7 @@ export default function DishDetail() {
           if (alive && nut) setDish((prev) => (prev ? { ...prev, ...nut } : prev));
         }
 
-        // 3) ADD-ON
+        // 3) ADD-ON: lấy danh sách
         let tops: Topping[] = [];
 
         tops = await fetchAddonsFromConfig(dishId);
@@ -291,10 +348,40 @@ export default function DishDetail() {
           }
         }
 
-        if (alive) {
-          setToppings(tops);
-          setCounts(Object.fromEntries(tops.map(t => [t.id, Math.max(0, t.min_steps ?? 0)])));
+        // 4) ==== NEW: gắn tồn kho (stock_g) & avail_steps cho add-on ====
+        if (tops.length > 0) {
+          const ids = Array.from(new Set(tops.map(t => Number(t.id))));
+          const stockRes = await supabase
+            .from("ingredients_nutrition")
+            .select("id, stock_g")
+            .in("id", ids as any[]);
+          const stockMap = new Map<number, number>();
+          (stockRes.data ?? []).forEach((r:any) => stockMap.set(Number(r.id), Number(r.stock_g || 0)));
+
+          const enriched = tops.map(t => {
+            const step = Number(t.amount_per_unit_g || 0);
+            const stockG = Number(stockMap.get(Number(t.id)) ?? 0);
+            const avail = step > 0 ? Math.floor(stockG / step) : 0;
+            return { ...t, stock_g: stockG, avail_steps: avail } as Topping;
+          });
+
+          // Lọc bỏ add-on không đủ để đạt min_steps
+          const filtered = enriched.filter(t => {
+            const minSteps = Math.max(0, t.min_steps ?? 0);
+            return (t.avail_steps ?? 0) >= minSteps;
+          });
+
+          if (alive) {
+            setToppings(filtered);
+            setCounts(Object.fromEntries(filtered.map(t => [t.id, Math.max(0, t.min_steps ?? 0)])));
+          }
+        } else {
+          if (alive) {
+            setToppings([]);
+            setCounts({});
+          }
         }
+
       } catch (err: any) {
         Alert.alert("Lỗi", err?.message ?? "Không tải được dữ liệu món");
       } finally {
@@ -336,11 +423,23 @@ export default function DishDetail() {
     carbs:   n0(dish?.carbs)   + addedNutri.carbs,
   };
 
+  // ===== Disable điều kiện =====
+  // ==== NEW: fallback chắc chắn chặn khi món là DISH và stock_units = 0 ====
+  const dishOutByMode = (dish?.stock_mode === "DISH") && Number(dish?.stock_units ?? 0) <= 0;
+  const dishOutByView = (dishAvail != null && Number(dishAvail) <= 0);
+  const dishOut = dishOutByMode || dishOutByView;
+
+  const addonsAllUnavailable = hadAddonSlots && toppings.length === 0; // có slot nhưng hiện không có add-on khả dụng
+  const addDisabled = dishOut || addonsAllUnavailable;
+
   const incTop = (tid: string | number, max?: number | null) =>
     setCounts(prev => {
+      const t = toppings.find(x => String(x.id) === String(tid));
       const cur = prev[tid] || 0;
-      const lim = (max ?? 99);
-      if (cur >= lim) return prev;
+      const hardMax = max ?? 99;
+      const stockMax = t?.avail_steps ?? 0;                 // ==== NEW: giới hạn theo kho
+      const practicalMax = Math.min(hardMax, stockMax);
+      if (addDisabled || cur >= practicalMax) return prev;
       return { ...prev, [tid]: cur + 1 };
     });
 
@@ -348,12 +447,20 @@ export default function DishDetail() {
     setCounts(prev => {
       const cur = prev[tid] || 0;
       const lim = (min ?? 0);
-      if (cur <= lim) return prev;
+      if (addDisabled || cur <= lim) return prev;
       return { ...prev, [tid]: cur - 1 };
     });
 
   const doAddToCart = async () => {
     if (!dish) return;
+
+    if (addDisabled) {
+      Alert.alert(
+        dishOut ? "Món đã hết hàng" : "Tạm hết nguyên liệu add-on",
+        dishOut ? "Vui lòng chọn món khác." : "Vui lòng quay lại sau hoặc chọn món khác."
+      );
+      return;
+    }
 
     const addons = toppings
       .map(t => {
@@ -380,7 +487,7 @@ export default function DishDetail() {
         name: dish.name,
         image_path: dish.image_path ?? null,
         base_price_vnd: basePrice,
-        qty: 1, // luôn 1 suất / lần thêm (đã bỏ nút cộng/trừ)
+        qty: 1, // luôn 1 suất / lần thêm
         addons,
         // snapshot dinh dưỡng / 1 suất
         kcal: totalNutriPerDish.kcal,
@@ -388,7 +495,6 @@ export default function DishDetail() {
         fat: totalNutriPerDish.fat,
         carbs: totalNutriPerDish.carbs,
         serving_size_g: dish.serving_size_g ?? null,
-
         // luôn tách thành dòng mới để người dùng tuỳ chỉnh add-on từng suất
         no_merge: true,
       });
@@ -440,89 +546,111 @@ export default function DishDetail() {
         </Text>
       </View>
 
-      {/* NỘI DUNG: chỉ danh sách add-on */}
+      {/* NỘI DUNG: danh sách add-on */}
       <ScrollView
         style={{ flex: 1 }}
-        contentContainerStyle={{ padding: 16, paddingBottom: FOOTER_H + 40 }}
+        contentContainerStyle={{ padding: 16, paddingBottom: 96 + insets.bottom + 40 }}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ borderRadius: 12, overflow: "hidden", backgroundColor: C.white, borderWidth: 1, borderColor: C.line }}>
-          {toppings.length === 0 ? (
-            <View style={{ padding: 14 }}>
-              <Text style={{ color: C.sub }}>Món này chưa có add-on.</Text>
-            </View>
-          ) : (
-            toppings.map((t, idx) => {
-              const c = counts[t.id] || 0;
-              const gramsAdded   = c * t.amount_per_unit_g;
-              const kcalAdded    = c * t.kcal_pu;
-              const carbsAdded   = c * t.carbs_pu;
-              const fatAdded     = c * t.fat_pu;
-              const proteinAdded = c * t.protein_pu;
-              const moneyAdded   = c * t.extra_price_vnd;
+        {/* Banner cảnh báo (tuỳ chọn) */}
+        {addDisabled && (
+          <View style={{ padding:10, borderRadius:10, borderWidth:1, borderColor:"#FECACA", backgroundColor:"#FEF2F2", marginBottom:8 }}>
+            <Text style={{ color:"#B91C1C", fontWeight:"700" }}>
+              {dishOut ? "Món đã hết hàng" : "Tạm hết nguyên liệu add-on"}
+            </Text>
+            <Text style={{ color:"#B91C1C", marginTop:2 }}>
+              {dishOut ? "Vui lòng chọn món khác." : "Vui lòng quay lại sau hoặc chọn món khác."}
+            </Text>
+          </View>
+        )}
 
-              const last = idx === toppings.length - 1;
-              const canInc = t.max_steps == null || c < (t.max_steps as number);
-              const canDec = c > (t.min_steps ?? 0);
+        <View style={{ opacity: addDisabled ? 0.55 : 1 }}>
+          <View style={{ borderRadius: 12, overflow: "hidden", backgroundColor: C.white, borderWidth: 1, borderColor: C.line }}>
+            {toppings.length === 0 ? (
+              <View style={{ padding: 14 }}>
+                <Text style={{ color: C.sub }}>
+                  {hadAddonSlots ? "Tạm hết nguyên liệu add-on." : "Món này chưa có add-on."}
+                </Text>
+              </View>
+            ) : (
+              toppings.map((t, idx) => {
+                const c = counts[t.id] || 0;
+                const gramsAdded   = c * t.amount_per_unit_g;
+                const kcalAdded    = c * t.kcal_pu;
+                const carbsAdded   = c * t.carbs_pu;
+                const fatAdded     = c * t.fat_pu;
+                const proteinAdded = c * t.protein_pu;
+                const moneyAdded   = c * t.extra_price_vnd;
 
-              return (
-                <View key={String(t.id)} style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: last ? 0 : 1, borderColor: C.line, backgroundColor: "#FBF7F0" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center" }}>
-                    <View style={{ width: 64, height: 64, borderRadius: 12, overflow: "hidden", backgroundColor: C.white }}>
-                      <AddonImg imageKey={t.image_key} />
+                const last = idx === toppings.length - 1;
+
+                const hardMax = t.max_steps ?? 99;
+                const stockMax = t.avail_steps ?? 0; // NEW
+                const practicalMax = Math.min(hardMax, stockMax);
+
+                const canInc = !addDisabled && c < practicalMax;
+                const canDec = !addDisabled && c > (t.min_steps ?? 0);
+
+                return (
+                  <View key={String(t.id)} style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: last ? 0 : 1, borderColor: C.line, backgroundColor: "#FBF7F0" }}>
+                    <View style={{ flexDirection: "row", alignItems: "center" }}>
+                      <View style={{ width: 64, height: 64, borderRadius: 12, overflow: "hidden", backgroundColor: C.white }}>
+                        <AddonImg imageKey={t.image_key} />
+                      </View>
+
+                      <View style={{ flex: 1, marginHorizontal: 12 }}>
+                        <Text style={{ color: C.text, fontWeight: "600" }}>{t.name}</Text>
+                        <Text style={{ color: C.sub, marginTop: 2, fontSize: 12 }}>
+                          +{fmtVND(t.extra_price_vnd)}
+                          {t.amount_per_unit_g ? ` · ~${round1(t.amount_per_unit_g)}g` : ""}
+                          <> · {round1(t.kcal_pu)} kcal, {round1(t.carbs_pu)}g C, {round1(t.fat_pu)}g F, {round1(t.protein_pu)}g P</>
+                          {t.max_steps != null ? ` · tối đa ${t.max_steps} bước` : ""}
+                          {t.avail_steps != null ? ` · còn ~${t.avail_steps} bước` : ""}
+                        </Text>
+                      </View>
+
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                        <Pressable
+                          onPress={() => decTop(t.id, t.min_steps)}
+                          disabled={!canDec}
+                          style={{
+                            width: 36, height: 36, borderRadius: 8,
+                            backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
+                            alignItems: "center", justifyContent: "center", opacity: canDec ? 1 : 0.4,
+                          }}
+                        >
+                          <Ionicons name="remove" size={18} color={C.text} />
+                        </Pressable>
+                        <Text style={{ minWidth: 20, textAlign: "center", fontWeight: "700" }}>{c}</Text>
+                        <Pressable
+                          onPress={() => incTop(t.id, t.max_steps)}
+                          disabled={!canInc}
+                          style={{
+                            width: 36, height: 36, borderRadius: 8,
+                            backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
+                            alignItems: "center", justifyContent: "center", opacity: canInc ? 1 : 0.4,
+                          }}
+                        >
+                          <Ionicons name="add" size={18} color={C.text} />
+                        </Pressable>
+                      </View>
                     </View>
 
-                    <View style={{ flex: 1, marginHorizontal: 12 }}>
-                      <Text style={{ color: C.text, fontWeight: "600" }}>{t.name}</Text>
-                      <Text style={{ color: C.sub, marginTop: 2, fontSize: 12 }}>
-                        +{fmtVND(t.extra_price_vnd)}
-                        {t.amount_per_unit_g ? ` · ~${round1(t.amount_per_unit_g)}g` : ""}
-                        <> · {round1(t.kcal_pu)} kcal, {round1(t.carbs_pu)}g C, {round1(t.fat_pu)}g F, {round1(t.protein_pu)}g P</>
-                        {t.max_steps != null ? ` · tối đa ${t.max_steps} bước` : ""}
-                      </Text>
-                    </View>
-
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                      <Pressable
-                        onPress={() => decTop(t.id, t.min_steps)}
-                        disabled={!canDec}
-                        style={{
-                          width: 36, height: 36, borderRadius: 8,
-                          backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                          alignItems: "center", justifyContent: "center", opacity: canDec ? 1 : 0.4,
-                        }}
-                      >
-                        <Ionicons name="remove" size={18} color={C.text} />
-                      </Pressable>
-                      <Text style={{ minWidth: 20, textAlign: "center", fontWeight: "700" }}>{c}</Text>
-                      <Pressable
-                        onPress={() => incTop(t.id, t.max_steps)}
-                        disabled={!canInc}
-                        style={{
-                          width: 36, height: 36, borderRadius: 8,
-                          backgroundColor: C.white, borderWidth: 1, borderColor: C.line,
-                          alignItems: "center", justifyContent: "center", opacity: canInc ? 1 : 0.4,
-                        }}
-                      >
-                        <Ionicons name="add" size={18} color={C.text} />
-                      </Pressable>
-                    </View>
+                    {c > 0 && (
+                      <View style={{ marginTop: 6, marginLeft: 76 }}>
+                        <Text style={{ color: C.text, fontSize: 12 }}>
+                          Đã thêm: <Text style={{ fontWeight: "700" }}>{round1(gramsAdded)}g</Text>
+                          {" · "}+{round1(kcalAdded)} kcal · {round1(carbsAdded)}g C · {round1(fatAdded)}g F · {round1(proteinAdded)}g P
+                          {" · "}+{fmtVND(moneyAdded)}
+                        </Text>
+                      </View>
+                    )}
                   </View>
-
-                  {c > 0 && (
-                    <View style={{ marginTop: 6, marginLeft: 76 }}>
-                      <Text style={{ color: C.text, fontSize: 12 }}>
-                        Đã thêm: <Text style={{ fontWeight: "700" }}>{round1(gramsAdded)}g</Text>
-                        {" · "}+{round1(kcalAdded)} kcal · {round1(carbsAdded)}g C · {round1(fatAdded)}g F · {round1(proteinAdded)}g P
-                        {" · "}+{fmtVND(moneyAdded)}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              );
-            })
-          )}
+                );
+              })
+            )}
+          </View>
         </View>
       </ScrollView>
 
@@ -545,21 +673,22 @@ export default function DishDetail() {
           </Text>
         </View>
 
-        {/* Nút thêm giỏ — không có nút cộng/trừ số lượng */}
+        {/* Nút thêm giỏ — khoá khi hết hàng / hết add-on */}
         <Pressable
+          disabled={addDisabled}
           onPress={doAddToCart}
           style={{
             width: "100%",
             paddingVertical: 12,
             paddingHorizontal: 18,
-            backgroundColor: C.accent,
+            backgroundColor: addDisabled ? "#9CA3AF" : C.accent,
             borderRadius: 20,
             alignItems: "center",
             justifyContent: "center",
           }}
         >
           <Text style={{ color: C.white, fontWeight: "700" }}>
-            Thêm vào giỏ hàng
+            {dishOut ? "Hết hàng" : (addonsAllUnavailable ? "Tạm hết nguyên liệu" : "Thêm vào giỏ hàng")}
           </Text>
         </Pressable>
       </View>
