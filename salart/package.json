@@ -30,13 +30,13 @@
     "react-native": "0.79.5",
     "react-native-gesture-handler": "~2.24.0",
     "react-native-get-random-values": "^1.11.0",
+    "react-native-maps": "1.20.1",
     "react-native-reanimated": "~3.17.4",
     "react-native-safe-area-context": "5.4.0",
     "react-native-svg": "15.11.2",
     "react-native-url-polyfill": "^2.0.0",
     "zod": "^4.0.17",
-    "zustand": "^5.0.7",
-    "react-native-maps": "1.20.1"
+    "zustand": "^5.0.7"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
@@ -45,5 +45,13 @@
     "supabase": "^2.34.3",
     "typescript": "~5.8.3"
   },
-  "private": true
+  "private": true,
+  "description": "",
+  "directories": {
+    "lib": "lib"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
 }

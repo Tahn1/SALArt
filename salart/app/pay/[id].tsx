@@ -4,6 +4,7 @@ import { View, Text, Pressable, Image, Alert, ActivityIndicator, ScrollView } fr
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "../../lib/supabase";
+import { clearCart } from "../../lib/cart"; // ✅ thêm
 
 const C = { bg:"#F6F2EA", panel:"#FFFFFF", text:"#111827", sub:"#6B7280", line:"#E5E7EB", dark:"#111827" };
 const fmtVnd = (n=0)=>{ try{ return n.toLocaleString("vi-VN")+" đ"; }catch{ return `${Math.round(n)} đ`; }};
@@ -17,10 +18,9 @@ export default function PayScreen(){
   const router = useRouter();
   const params = useLocalSearchParams();
 
-  // ⚠️ id/amount có thể là string | string[] | undefined → chuẩn hoá
+  // Chuẩn hoá param
   const rawId = Array.isArray(params.id) ? params.id[0] : params.id;
   const rawAmount = Array.isArray(params.amount) ? params.amount[0] : params.amount;
-
   const orderId = Number.parseInt(String(rawId ?? ""), 10);
   const total = useMemo(()=> {
     const n = Number(rawAmount ?? "0");
@@ -48,7 +48,7 @@ export default function PayScreen(){
     return `https://img.vietqr.io/image/${BANK_SHORT}-${ACCOUNT_NO}-qr_only.png?amount=${amt}&addInfo=${info}&accountName=${name}`;
   }, [total, orderCode]);
 
-  // === Realtime: chỉ nghe server đổi trạng thái → tự về Bill khi đã thanh toán
+  // === Realtime: server đổi trạng thái → tự về Bill
   const [payStatus, setPayStatus] = useState<string|null>(null);
   useEffect(()=>{
     if (!Number.isFinite(orderId)) return;
@@ -70,9 +70,7 @@ export default function PayScreen(){
             const s = (payload.new as any)?.payment_status;
             if (!s) return;
             setPayStatus(String(s));
-            if (s === "paid" || s === "paid_demo") {
-              router.replace(`/bill/${orderId}`);
-            }
+            if (s === "paid" || s === "paid_demo") router.replace(`/bill/${orderId}`);
           }
         )
         .subscribe();
@@ -81,20 +79,38 @@ export default function PayScreen(){
     return ()=>{ try{ ch && supabase.removeChannel(ch); }catch{} };
   }, [orderId]);
 
-  // COD như cũ
+  // ✅ COD: trừ kho (RPC), set paid, xoá giỏ & điều hướng
   async function confirmCOD(){
     if (!Number.isFinite(orderId)) { Alert.alert("Lỗi", "Không xác định được mã đơn."); return; }
     setSaving(true);
     try{
-      const { error } = await supabase
+      // 1) Trừ kho idempotent theo đơn (nếu đã trừ sẽ báo ALREADY_CONSUMED)
+      const { error: eStock } = await supabase.rpc("consume_stock_for_order", { p_order_id: orderId });
+      if (eStock && !/ALREADY_CONSUMED/i.test(String(eStock.message||""))) {
+        // Nếu kho thiếu: báo lỗi và dừng
+        if (/OUT_OF_STOCK/i.test(String(eStock.message||""))) {
+          throw new Error("Hết nguyên liệu cho một số món. Vui lòng điều chỉnh đơn.");
+        }
+        throw eStock;
+      }
+
+      // 2) Đánh dấu đã thanh toán COD
+      const { error: ePaid } = await supabase
         .from("orders")
-        .update({ payment_method:"cod", payment_status:"awaiting_cod" })
+        .update({ payment_method:"cod", payment_status:"paid", paid_at: new Date().toISOString() })
         .eq("id", orderId);
-      if (error && !/column .* does not exist/i.test(error.message)) throw error;
+      if (ePaid) throw ePaid;
+
+      // 3) Xoá giỏ hàng local
+      try { clearCart?.(); } catch {}
+
+      // 4) Về Bill
       router.replace(`/bill/${orderId}`);
     }catch(e:any){
       Alert.alert("Lỗi", e?.message ?? "Vui lòng thử lại.");
-    }finally{ setSaving(false); }
+    }finally{
+      setSaving(false);
+    }
   }
 
   const hint =
@@ -102,7 +118,6 @@ export default function PayScreen(){
     : payStatus === "paid" || payStatus === "paid_demo" ? "Đã thanh toán"
     : "Quét QR để chuyển khoản. Hệ thống sẽ tự cập nhật khi ngân hàng xác nhận thành công.";
 
-  // ⛔ Guard: thiếu/ID không hợp lệ → tránh crash & báo điều hướng
   if (!Number.isFinite(orderId)) {
     return (
       <View style={{ flex:1, backgroundColor:C.bg }}>
@@ -168,7 +183,7 @@ export default function PayScreen(){
               <Text style={{ color:C.sub, marginTop:6 }}>Nội dung: {orderCode}</Text>
             </View>
 
-            {/* KHÔNG có nút “Tôi đã chuyển khoản” — chỉ dựa vào webhook server */}
+            {/* Không có nút “Tôi đã chuyển khoản” — chờ webhook server */}
           </View>
         ) : (
           <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:16 }}>

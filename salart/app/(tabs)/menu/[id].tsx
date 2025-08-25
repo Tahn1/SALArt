@@ -7,7 +7,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../../../lib/supabase";
-import { addToCart } from "../../../lib/cart";
+// 🔁 DÙNG HÀM CHECK MỚI & ĐỌC GIỎ
+import { addToCartChecked, useCart } from "../../../lib/cart";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type DishRow = {
@@ -20,7 +21,6 @@ type DishRow = {
   fat?: number | null;
   carbs?: number | null;
   serving_size_g?: number | null;
-  // ==== NEW: fallback theo bảng dishes ====
   stock_mode?: "ING" | "DISH" | null;
   stock_units?: number | null;
 };
@@ -28,18 +28,17 @@ type DishRow = {
 type Topping = {
   id: string | number;
   name: string;
-  image_key?: string | null;    // KEY trong bucket ingredients
-  amount_per_unit_g: number;    // gram mỗi step
-  extra_price_vnd: number;      // phụ thu / 1 step
+  image_key?: string | null;
+  amount_per_unit_g: number;
+  extra_price_vnd: number;
   kcal_pu: number;
   protein_pu: number;
   fat_pu: number;
   carbs_pu: number;
   min_steps?: number | null;
   max_steps?: number | null;
-  // ==== NEW: tồn kho & số bước khả dụng theo kho ====
-  stock_g?: number;             // gram còn lại của nguyên liệu
-  avail_steps?: number;         // floor(stock_g / step_g)
+  stock_g?: number;
+  avail_steps?: number;
 };
 
 const C = {
@@ -94,7 +93,6 @@ function buildStorageUrl(
   }).data.publicUrl;
 }
 
-// Ảnh add-on (bucket "ingredients")
 const ING_DEFAULT_KEY = "ingredients/default.jpg";
 const ingWebp = (key?: string | null, size = 160) =>
   buildStorageUrl("ingredients", key || ING_DEFAULT_KEY, size, 75, true,  "cover", size);
@@ -156,7 +154,6 @@ async function fetchAddonsFromConfig(dishId: number): Promise<Topping[]> {
 
   if (cfgRes.error || !(cfgRes.data?.length)) return [];
 
-  // (chưa gắn stock ở đây — sẽ gắn ở component sau khi gom đủ list)
   return (cfgRes.data ?? []).map((row: any) => {
     const info = ingredientInfo[row.ingredient_id] || {};
     const step = Number(row.step_g ?? 20);
@@ -198,9 +195,16 @@ export default function DishDetail() {
   const [toppings, setToppings] = useState<Topping[]>([]);
   const [counts, setCounts] = useState<Record<string | number, number>>({});
 
-  // NEW: tồn kho món & flag “món có ô add-on không”
+  // tồn kho món
   const [dishAvail, setDishAvail] = useState<number | null>(null);
   const [hadAddonSlots, setHadAddonSlots] = useState<boolean>(false);
+
+  // === SỐ LƯỢNG ĐANG CÓ TRONG GIỎ CHO MÓN NÀY (để chặn vượt)
+  const { items } = useCart();
+  const inCartQtyForDish = useMemo(
+    () => items.filter(it => it.dish_id === dishId).reduce((s, it) => s + (it.qty || 0), 0),
+    [items, dishId]
+  );
 
   const FOOTER_H = 96 + insets.bottom;
 
@@ -227,7 +231,7 @@ export default function DishDetail() {
     return () => { alive = false; };
   }, [dishId]);
 
-  // Kiểm tra món có “ô add-on” hay không (khác món vốn không có add-on)
+  // Kiểm tra có “slot add-on”
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -256,7 +260,7 @@ export default function DishDetail() {
       try {
         setLoading(true);
 
-        // 1) món (lấy giá base) + ==== NEW: lấy stock_mode, stock_units để fallback ====
+        // 1) món (lấy giá + stock fallback)
         const colsWithPrice = "id,name,image_path,price_vnd,stock_mode,stock_units";
         const colsNoPrice   = "id,name,image_path,stock_mode,stock_units";
         let d: any | null = null;
@@ -270,7 +274,7 @@ export default function DishDetail() {
         if (!alive) return;
         setDish(d);
 
-        // 2) dinh dưỡng base 1 suất (để lưu vào giỏ)
+        // 2) dinh dưỡng base 1 suất
         const nutRes = await supabase
           .from("dish_nutrition_default")
           .select("kcal,protein,fat,carbs,serving_size_g")
@@ -281,7 +285,7 @@ export default function DishDetail() {
           if (alive && nut) setDish((prev) => (prev ? { ...prev, ...nut } : prev));
         }
 
-        // 3) ADD-ON: lấy danh sách
+        // 3) danh sách add-on
         let tops: Topping[] = [];
 
         tops = await fetchAddonsFromConfig(dishId);
@@ -348,7 +352,7 @@ export default function DishDetail() {
           }
         }
 
-        // 4) ==== NEW: gắn tồn kho (stock_g) & avail_steps cho add-on ====
+        // 4) gắn tồn kho add-on
         if (tops.length > 0) {
           const ids = Array.from(new Set(tops.map(t => Number(t.id))));
           const stockRes = await supabase
@@ -365,7 +369,6 @@ export default function DishDetail() {
             return { ...t, stock_g: stockG, avail_steps: avail } as Topping;
           });
 
-          // Lọc bỏ add-on không đủ để đạt min_steps
           const filtered = enriched.filter(t => {
             const minSteps = Math.max(0, t.min_steps ?? 0);
             return (t.avail_steps ?? 0) >= minSteps;
@@ -396,7 +399,6 @@ export default function DishDetail() {
     () => toppings.reduce((sum, t) => sum + (counts[t.id] || 0) * t.extra_price_vnd, 0),
     [toppings, counts]
   );
-
   const basePrice = n0(dish?.price_vnd);
   const pricePerDish = basePrice + extraPerDishVnd;
 
@@ -424,20 +426,23 @@ export default function DishDetail() {
   };
 
   // ===== Disable điều kiện =====
-  // ==== NEW: fallback chắc chắn chặn khi món là DISH và stock_units = 0 ====
   const dishOutByMode = (dish?.stock_mode === "DISH") && Number(dish?.stock_units ?? 0) <= 0;
   const dishOutByView = (dishAvail != null && Number(dishAvail) <= 0);
   const dishOut = dishOutByMode || dishOutByView;
 
-  const addonsAllUnavailable = hadAddonSlots && toppings.length === 0; // có slot nhưng hiện không có add-on khả dụng
-  const addDisabled = dishOut || addonsAllUnavailable;
+  // 🔒 chặn vượt khi đã có sẵn trong giỏ
+  const leftForCart = dishAvail == null ? null : Math.max(0, Number(dishAvail) - inCartQtyForDish);
+  const overByCart  = dishAvail != null && leftForCart <= 0;
+
+  const addonsAllUnavailable = hadAddonSlots && toppings.length === 0;
+  const addDisabled = dishOut || addonsAllUnavailable || overByCart;
 
   const incTop = (tid: string | number, max?: number | null) =>
     setCounts(prev => {
       const t = toppings.find(x => String(x.id) === String(tid));
       const cur = prev[tid] || 0;
       const hardMax = max ?? 99;
-      const stockMax = t?.avail_steps ?? 0;                 // ==== NEW: giới hạn theo kho
+      const stockMax = t?.avail_steps ?? 0;
       const practicalMax = Math.min(hardMax, stockMax);
       if (addDisabled || cur >= practicalMax) return prev;
       return { ...prev, [tid]: cur + 1 };
@@ -455,10 +460,11 @@ export default function DishDetail() {
     if (!dish) return;
 
     if (addDisabled) {
-      Alert.alert(
-        dishOut ? "Món đã hết hàng" : "Tạm hết nguyên liệu add-on",
-        dishOut ? "Vui lòng chọn món khác." : "Vui lòng quay lại sau hoặc chọn món khác."
-      );
+      const msg =
+        dishOut ? "Món đã hết hàng"
+        : overByCart ? "Bạn đã thêm tối đa số suất có thể đặt."
+        : "Tạm hết nguyên liệu add-on";
+      Alert.alert("Không thể thêm", msg);
       return;
     }
 
@@ -482,22 +488,26 @@ export default function DishDetail() {
       }[];
 
     try {
-      addToCart({
+      const ok = await addToCartChecked({
         dish_id: dish.id,
         name: dish.name,
         image_path: dish.image_path ?? null,
         base_price_vnd: basePrice,
-        qty: 1, // luôn 1 suất / lần thêm
+        qty: 1,
         addons,
-        // snapshot dinh dưỡng / 1 suất
         kcal: totalNutriPerDish.kcal,
         protein: totalNutriPerDish.protein,
         fat: totalNutriPerDish.fat,
         carbs: totalNutriPerDish.carbs,
         serving_size_g: dish.serving_size_g ?? null,
-        // luôn tách thành dòng mới để người dùng tuỳ chỉnh add-on từng suất
         no_merge: true,
-      });
+      }, true); // verifyWithServer = true
+
+      if (!ok) {
+        Alert.alert("Không thể thêm", "Món này không còn đủ suất.");
+        return;
+      }
+
       Alert.alert("Đã thêm vào giỏ", dish.name);
       router.back();
     } catch (e: any) {
@@ -553,15 +563,19 @@ export default function DishDetail() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* Banner cảnh báo (tuỳ chọn) */}
+        {/* Banner cảnh báo */}
         {addDisabled && (
           <View style={{ padding:10, borderRadius:10, borderWidth:1, borderColor:"#FECACA", backgroundColor:"#FEF2F2", marginBottom:8 }}>
             <Text style={{ color:"#B91C1C", fontWeight:"700" }}>
-              {dishOut ? "Món đã hết hàng" : "Tạm hết nguyên liệu add-on"}
+              {dishOut ? "Món đã hết hàng"
+               : overByCart ? "Bạn đã thêm tối đa số suất có thể đặt."
+               : "Tạm hết nguyên liệu add-on"}
             </Text>
-            <Text style={{ color:"#B91C1C", marginTop:2 }}>
-              {dishOut ? "Vui lòng chọn món khác." : "Vui lòng quay lại sau hoặc chọn món khác."}
-            </Text>
+            {inCartQtyForDish > 0 && (
+              <Text style={{ color:"#B91C1C", marginTop:2 }}>
+                Trong giỏ: {inCartQtyForDish}
+              </Text>
+            )}
           </View>
         )}
 
@@ -586,7 +600,7 @@ export default function DishDetail() {
                 const last = idx === toppings.length - 1;
 
                 const hardMax = t.max_steps ?? 99;
-                const stockMax = t.avail_steps ?? 0; // NEW
+                const stockMax = t.avail_steps ?? 0;
                 const practicalMax = Math.min(hardMax, stockMax);
 
                 const canInc = !addDisabled && c < practicalMax;
@@ -654,7 +668,7 @@ export default function DishDetail() {
         </View>
       </ScrollView>
 
-      {/* FOOTER (tổng tiền full-width, không bị …) */}
+      {/* FOOTER */}
       <View
         style={{
           position: "absolute",
@@ -666,14 +680,19 @@ export default function DishDetail() {
           borderTopWidth: 1, borderColor: C.line,
         }}
       >
-        {/* Tổng tiền: 1 dòng riêng, full-width */}
+        {/* 🔕 chỉ hiện “Trong giỏ: X” */}
+        {inCartQtyForDish > 0 && (
+          <Text style={{ color: C.sub, marginBottom: 6 }}>
+            Trong giỏ: {inCartQtyForDish}
+          </Text>
+        )}
+
         <View style={{ marginBottom: 8 }}>
           <Text style={{ fontSize: 18, fontWeight: "800", color: C.text }}>
             {fmtVND(pricePerDish)}
           </Text>
         </View>
 
-        {/* Nút thêm giỏ — khoá khi hết hàng / hết add-on */}
         <Pressable
           disabled={addDisabled}
           onPress={doAddToCart}
@@ -688,7 +707,10 @@ export default function DishDetail() {
           }}
         >
           <Text style={{ color: C.white, fontWeight: "700" }}>
-            {dishOut ? "Hết hàng" : (addonsAllUnavailable ? "Tạm hết nguyên liệu" : "Thêm vào giỏ hàng")}
+            {dishOut ? "Hết hàng"
+             : addonsAllUnavailable ? "Tạm hết nguyên liệu"
+             : overByCart ? "Đã đủ suất trong giỏ"
+             : "Thêm vào giỏ hàng"}
           </Text>
         </Pressable>
       </View>
