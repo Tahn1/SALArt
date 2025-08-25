@@ -1,16 +1,18 @@
 // app/bill/[id].tsx
-import React, { useMemo } from "react";
+import React, { useMemo, useEffect, useState } from "react";
 import { View, Text, ScrollView, Pressable } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { supabase } from "../../lib/supabase"; // ✅ lắng nghe realtime
 
-const C = { bg:"#F6F2EA", panel:"#FFFFFF", text:"#111827", sub:"#6B7280", line:"#E5E7EB", ok:"#16a34a" };
+const C = { bg:"#F6F2EA", panel:"#FFFFFF", text:"#111827", sub:"#6B7280", line:"#E5E7EB", ok:"#16a34a", warn:"#f59e0b" };
 const fmtVnd = (n=0)=>{ try{ return n.toLocaleString("vi-VN")+" đ"; }catch{ return `${Math.round(n)} đ`; }};
 
 export default function BillScreen(){
   const router = useRouter();
   const params = useLocalSearchParams() as { id?:string; summary?:string };
+  const orderId = Number(params?.id);
 
-  // Parse snapshot
+  // ===== SNAPSHOT (như cũ) =====
   const snap = useMemo(()=>{
     try{
       if (!params.summary) return null;
@@ -18,7 +20,7 @@ export default function BillScreen(){
     }catch{ return null; }
   }, [params.summary]);
 
-  // Thời gian dự kiến (demo): +30' nếu giao tại nhà, +15' nếu nhận tại quầy
+  // ===== ETA (như cũ) =====
   const eta = useMemo(()=>{
     const now = new Date();
     const add = snap?.method === "delivery" ? 30 : 15;
@@ -36,12 +38,7 @@ export default function BillScreen(){
 
   const items = Array.isArray(snap?.items) ? snap.items : [];
   const lines = items.flatMap((it:any) => {
-    const base = [{
-      key: `dish-${it.name}`,
-      text: `${it.name}`,
-      price: (it.base_price_vnd ?? 0) * (it.qty ?? 1),
-      right: it.qty > 1 ? `× ${it.qty}` : undefined
-    }];
+    const base = [{ key: `dish-${it.name}`, text: `${it.name}`, price: (it.base_price_vnd ?? 0) * (it.qty ?? 1), right: it.qty > 1 ? `× ${it.qty}` : undefined }];
     const addons = (it.addons ?? []).map((a:any, idx:number) => ({
       key: `addon-${it.name}-${idx}`,
       text: `Topping — ${a.name}`,
@@ -52,11 +49,41 @@ export default function BillScreen(){
     return [...base, ...addons].filter(row => row.price > 0);
   });
 
+  // ===== Realtime payment_status =====
+  const [payStatus, setPayStatus] = useState<string>("unpaid"); // unpaid | pending_confirm | paid | paid_demo | awaiting_cod ...
+  useEffect(()=>{
+    if (!Number.isFinite(orderId)) return;
+    let ch: any;
+
+    (async ()=>{
+      // trạng thái ban đầu
+      const { data } = await supabase.from("orders").select("payment_status").eq("id", orderId).maybeSingle();
+      if (data?.payment_status) setPayStatus(String(data.payment_status));
+      // subscribe
+      ch = supabase
+        .channel(`orders:${orderId}`)
+        .on("postgres_changes",
+          { event:"UPDATE", schema:"public", table:"orders", filter:`id=eq.${orderId}` },
+          (payload)=> {
+            const s = (payload.new as any)?.payment_status;
+            if (s) setPayStatus(String(s));
+          }
+        )
+        .subscribe();
+    })();
+
+    return ()=>{ try{ supabase.removeChannel(ch); }catch{} };
+  }, [orderId]);
+
+  const paidLike = payStatus === "paid" || payStatus === "paid_demo";
+  const pendingLike = payStatus === "pending_confirm";
+
   return (
     <View style={{ flex:1, backgroundColor:C.bg }}>
       <Stack.Screen
         options={{
-          title: "Hóa đơn",
+          headerShown: true,
+          title: params?.id ? `Hóa đơn #${params.id}` : "Hóa đơn",
           headerShadowVisible: false,
           headerStyle: { backgroundColor: C.panel },
           headerTitleStyle: { fontWeight: "800" },
@@ -64,9 +91,25 @@ export default function BillScreen(){
       />
 
       <ScrollView contentContainerStyle={{ padding:16, paddingBottom:24 }}>
-        {/* Khối thông tin giao/nhận */}
+        {/* 🔔 Trạng thái thanh toán */}
+        <View style={{ marginBottom:12 }}>
+          <View style={{
+            alignSelf: "flex-start",
+            backgroundColor: paidLike ? "#dcfce7" : (pendingLike ? "#fff7ed" : "#f3f4f6"),
+            borderColor: paidLike ? C.ok : (pendingLike ? C.warn : C.line),
+            borderWidth: 1, paddingHorizontal:10, paddingVertical:6, borderRadius:999
+          }}>
+            <Text style={{ color: paidLike ? "#166534" : (pendingLike ? "#92400e" : C.text), fontWeight:"800" }}>
+              {paidLike ? "ĐÃ THANH TOÁN" : (pendingLike ? "ĐANG CHỜ XÁC NHẬN" : "CHƯA THANH TOÁN")}
+            </Text>
+          </View>
+        </View>
+
+        {/* Info */}
         <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:14, marginBottom:12, gap:8 }}>
-          <Text style={{ color:C.sub }}> {snap?.method==="delivery" ? "Nhận hàng" : "Nhận tại quầy"} <Text style={{ color:C.text, fontWeight:"800" }}>{eta}</Text></Text>
+          <Text style={{ color:C.sub }}>
+            {snap?.method==="delivery" ? "Nhận hàng" : "Nhận tại quầy"} <Text style={{ color:C.text, fontWeight:"800" }}>{eta}</Text>
+          </Text>
           <Text style={{ color:C.text, fontWeight:"700", marginTop:2 }}>
             {snap?.method==="delivery" ? "Tại" : "Tại cửa hàng"}
           </Text>
@@ -80,7 +123,7 @@ export default function BillScreen(){
           )}
         </View>
 
-        {/* Chi tiết thanh toán */}
+        {/* Payment detail */}
         <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:14 }}>
           <Text style={{ fontWeight:"800", color:C.text, marginBottom:8 }}>Chi tiết thanh toán</Text>
 
@@ -90,7 +133,6 @@ export default function BillScreen(){
           ))}
 
           <Spacer />
-
           <Row label="Tổng tiền Phí giao hàng" value={fmtVnd(shippingFee)} bold />
 
           {!!promotions.length && (
@@ -104,7 +146,6 @@ export default function BillScreen(){
           )}
 
           <Spacer />
-
           <Row label="Tổng thanh toán" value={fmtVnd(grandTotal)} bold big />
           <Text style={{ color:C.sub, fontSize:12, marginTop:6 }}>
             Bao gồm {Math.round((snap?.VAT_RATE??0.08)*100)}% VAT {snap?.method==="delivery" ? "và phí giao hàng" : ""}
@@ -113,6 +154,20 @@ export default function BillScreen(){
 
         {/* CTA */}
         <View style={{ marginTop:16, gap:10 }}>
+          {/* Nếu đã thanh toán -> ẩn/khóa nút Thanh toán */}
+          {!paidLike ? (
+            <Pressable
+              onPress={()=>router.push({ pathname: "/pay/[id]", params: { id: String(params.id || ""), amount: String(grandTotal || 0) } })}
+              style={{ backgroundColor:"#111827", paddingVertical:14, borderRadius:14, alignItems:"center" }}
+            >
+              <Text style={{ color:"#fff", fontWeight:"800" }}>Thanh toán</Text>
+            </Pressable>
+          ) : (
+            <View style={{ backgroundColor:"#dcfce7", borderColor:C.ok, borderWidth:1, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
+              <Text style={{ color:"#166534", fontWeight:"800" }}>ĐÃ THANH TOÁN</Text>
+            </View>
+          )}
+
           <Pressable
             onPress={()=>router.replace("/")}
             style={{ backgroundColor:C.ok, paddingVertical:14, borderRadius:14, alignItems:"center" }}
@@ -131,9 +186,7 @@ export default function BillScreen(){
   );
 }
 
-function Row({
-  label, value, right, bold, big, muted, danger
-}:{
+function Row({ label, value, right, bold, big, muted, danger }:{
   label:string; value:string; right?:string; bold?:boolean; big?:boolean; muted?:boolean; danger?:boolean;
 }){
   return (
@@ -150,5 +203,4 @@ function Row({
     </View>
   );
 }
-
 function Spacer(){ return <View style={{ height:10, borderBottomWidth:1, borderColor:C.line, marginVertical:6 }} />; }

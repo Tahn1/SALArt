@@ -3,20 +3,20 @@ import React, { useEffect, useState } from "react";
 import { View } from "react-native";
 import { Stack, Redirect, useSegments } from "expo-router";
 import { supabase } from "../lib/supabase";
-import { hasOnboardedUserLocal } from "../lib/onboardingUser.local"; // dùng LOCAL
+import { hasOnboardedUserLocal } from "../lib/onboardingUser.local";
 
 type Phase = "loading" | "anon" | "needsOnb" | "authed";
 
 export default function RootLayout() {
   const segments = useSegments();
-  const group = (segments[0] as string | undefined) ?? undefined;
+  const first = (segments[0] as string | undefined) ?? undefined;
+  const isGroup = !!first && first.startsWith("(");
 
   const [phase, setPhase] = useState<Phase>("loading");
 
   useEffect(() => {
     let unsub: any;
     (async () => {
-      // đọc session hiện tại
       const { data } = await supabase.auth.getSession();
       const sess = data.session;
 
@@ -27,12 +27,8 @@ export default function RootLayout() {
         setPhase(ok ? "authed" : "needsOnb");
       }
 
-      // lắng nghe thay đổi phiên
       unsub = supabase.auth.onAuthStateChange(async (_e, s) => {
-        if (!s?.user) {
-          setPhase("anon");
-          return;
-        }
+        if (!s?.user) { setPhase("anon"); return; }
         const ok = await hasOnboardedUserLocal(s.user.id);
         setPhase(ok ? "authed" : "needsOnb");
       });
@@ -45,41 +41,35 @@ export default function RootLayout() {
   }, []);
 
   // ======= GATE =======
-  // loading: nền trống, không render con để tránh nháy Home
   if (phase === "loading") {
     return <View style={{ flex: 1, backgroundColor: "#F8F4EF" }} />;
   }
 
-  // CHƯA đăng nhập -> cho phép hiển thị nhóm (onboarding) (startup)
+  // CHƯA đăng nhập -> chỉ cho nhóm (onboarding)/(auth)
   if (phase === "anon") {
-    if (group === "(onboarding)" || group === "(auth)") {
-      // đang ở đúng nhóm: render các màn startup/login
+    if (first === "(onboarding)" || first === "(auth)") {
       return <Stack screenOptions={{ headerShown: false }} />;
     }
-    // đang ở nhóm khác -> chuyển về startup
     return <Redirect href="/startup" />;
   }
 
-  // ĐÃ đăng nhập nhưng CHƯA onboard (user)
+  // ĐÃ đăng nhập nhưng CHƯA onboard
   if (phase === "needsOnb") {
-    if (group === "(onboarding)") {
-      // đã ở đúng nhóm → hiển thị /onboarding
+    if (first === "(onboarding)") {
       return <Stack screenOptions={{ headerShown: false }} />;
     }
-    // ép qua /onboarding
     return <Redirect href="/onboarding" />;
   }
 
-  // ĐÃ đăng nhập & ĐÃ onboard -> nhóm (tabs)
+  // ĐÃ đăng nhập & ĐÃ onboard
   if (phase === "authed") {
-    if (group === "(tabs)") {
-      // đã ở tabs -> render Home/Tab
+    // ✅ Cho phép (tabs) và BẤT KỲ route không phải group (vd. /bill/[id], /pay/[id])
+    if (first === "(tabs)" || !isGroup) {
       return <Stack screenOptions={{ headerShown: false }} />;
     }
-    // chuyển vào /
+    // Các group khác -> ép về trang chủ
     return <Redirect href="/" />;
   }
 
-  // fallback (không bao giờ tới)
   return <Stack screenOptions={{ headerShown: false }} />;
 }

@@ -1,4 +1,4 @@
-// app/(tabs)/cart.tsx — CartScreen (NO MAP) + Add-on stock limits + NAV→BILL
+// app/(tabs)/cart.tsx — CartScreen (NO MAP) + Add-on stock limits + NAV→BILL (jsonb)
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, ActivityIndicator, ScrollView, Pressable, Text, TextInput, View, Platform,
@@ -10,7 +10,7 @@ import { Feather } from "@expo/vector-icons";
 import { supabase } from "../../lib/supabase";
 import { useCart, removeLine, removeAddon, setAddonQty } from "../../lib/cart";
 import { STORE } from "../../lib/store";
-import { useRouter } from "expo-router"; // ✅ THÊM: để điều hướng sang bill
+import { useRouter } from "expo-router";
 
 const GEOAPIFY_KEY = process.env.EXPO_PUBLIC_GEOAPIFY_KEY || "";
 
@@ -74,7 +74,7 @@ export default function CartScreen(){
   const tabH   = useBottomTabBarHeight();
   const bottomSpace = (insets.bottom || 12) + tabH + 90;
   const { items, totalVnd } = useCart();
-  const router = useRouter(); // ✅ THÊM
+  const router = useRouter();
 
   // ===== Shipping & Address =====
   const [shipMethod,setShipMethod] = useState<"pickup"|"delivery">("pickup");
@@ -264,7 +264,7 @@ export default function CartScreen(){
     if (addonIds.length === 0) { setAddonMeta({}); return; }
     setAddonMetaLoading(true);
     try{
-      // yêu cầu đã có FK: ingredient_addon_config(ingredient_id) -> ingredients_nutrition(id)
+      // cần FK: ingredient_addon_config(ingredient_id) -> ingredients_nutrition(id)
       const { data, error } = await supabase
         .from("ingredients_nutrition")
         .select("id, stock_g, ingredient_addon_config(step_g, min_steps, max_steps)")
@@ -282,21 +282,19 @@ export default function CartScreen(){
       });
       setAddonMeta(map);
     }catch{
-      setAddonMeta({}); // fallback sẽ dùng default
+      setAddonMeta({}); // fallback
     }finally{
       setAddonMetaLoading(false);
     }
   }
-  useEffect(()=>{ loadAddonMeta(); /* reload khi danh sách add-on thay đổi */ }, [addonIds.join(",")]);
+  useEffect(()=>{ loadAddonMeta(); }, [addonIds.join(",")]);
 
   // Tổng số bước add-on đã đặt trong giỏ theo ingredient
   const reservedStepsByIng = useMemo(()=>{
     const m:Record<number,number> = {};
-    for (const it of items) {
-      for (const a of (it.addons??[])) {
-        const id = Number(a.id);
-        m[id] = (m[id] || 0) + (Number(a.qty_units) || 0);
-      }
+    for (const it of items) for (const a of (it.addons??[])) {
+      const id = Number(a.id);
+      m[id] = (m[id] || 0) + (Number(a.qty_units) || 0);
     }
     return m;
   }, [items]);
@@ -313,7 +311,6 @@ export default function CartScreen(){
       const totalSteps = Math.floor(Math.max(0, meta.stock_g) / Math.max(1, meta.step_g));
       const reserved = reservedStepsByIng[id] || 0;
       if (reserved > totalSteps) {
-        // tìm tên add-on để báo
         let name = "";
         items.forEach(it => (it.addons||[]).forEach((a:any)=>{ if(Number(a.id)===id && !name) name=a.name; }));
         Alert.alert("Add-on vượt tồn kho", `${name || "Một add-on"} đã vượt số bước còn lại trong kho.`);
@@ -356,6 +353,8 @@ export default function CartScreen(){
           id:a.id, name:a.name, qty_units:a.qty_units, extra_price_vnd_per_unit:a.extra_price_vnd_per_unit
         })),
       }));
+
+      // JSONB meta -> khớp RPC (jsonb,jsonb)
       const meta = {
         METHOD: shipMethod,
         ADDRESS: shipMethod==="delivery" ? shippingAddress.trim() : null,
@@ -366,14 +365,15 @@ export default function CartScreen(){
         DEST: destCoords,
         DEST_PRECISE: destPrecise,
       };
-      const p_note = meta;
+      const p_note = meta; // <-- gửi JSON, KHÔNG stringify
 
       const { data, error } = await supabase.rpc("create_order",{ p_note, p_lines });
       if(error) throw error;
 
       const orderId = Number(data);
+      if (!Number.isFinite(orderId)) throw new Error("ORDER_ID_INVALID");
 
-      // ✅ SNAPSHOT hóa đơn để sang màn Bill hiển thị tức thì
+      // Snapshot sang màn Bill
       const summary = {
         orderId,
         createdAt: Date.now(),
@@ -393,10 +393,8 @@ export default function CartScreen(){
             id:a.id, name:a.name, qty_units:a.qty_units, extra_price_vnd_per_unit:a.extra_price_vnd_per_unit
           }))
         })),
-        // promotions: [] // nếu sau này có code giảm giá, thêm vào đây
       };
 
-      // 👉 Điều hướng sang hóa đơn
       router.replace({
         pathname: "/bill/[id]",
         params: {
