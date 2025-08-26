@@ -1,89 +1,151 @@
-// supabase/functions/demo-pay/index.ts
-// Demo webhook: gọi POST để đánh dấu đơn "ĐÃ THANH TOÁN" + (tùy chọn) trừ kho.
-// Bảo mật đơn giản bằng header x-demo-secret (đặt trong .env hoặc secrets).
+
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const SUPABASE_URL  = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const DEMO_SECRET   = Deno.env.get("DEMO_WEBHOOK_SECRET") || ""; // tuỳ chọn
+const SUPABASE_URL   = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+const PAYOS_CLIENT_ID    = Deno.env.get("PAYOS_CLIENT_ID")!;
+const PAYOS_API_KEY      = Deno.env.get("PAYOS_API_KEY")!;
+const PAYOS_CHECKSUM_KEY = Deno.env.get("PAYOS_CHECKSUM_KEY")!; // để sẵn nếu cần ký sau này
 
-type Body = {
-  order_id?: number | string;
-  amount_vnd?: number;     // tuỳ chọn, nếu muốn cross-check
-  force_method?: "bank_transfer" | "cod"; // tuỳ chọn
+// (tuỳ chọn) cấu hình return/cancel url nếu muốn PayOS redirect về web của bạn
+const PAYOS_RETURN_URL   = Deno.env.get("PAYOS_RETURN_URL") || undefined;
+const PAYOS_CANCEL_URL   = Deno.env.get("PAYOS_CANCEL_URL") || undefined;
+
+const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+function json(obj: unknown, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS },
+  });
+}
+
+type Req = {
+  orderCode: number | string;  // ID đơn trong DB (vd 48)
+  amount: number | string;     // VND
+  description?: string;
+  forceNew?: boolean;
+};
+
+// Sinh mã biến thể số: vẫn map về đơn gốc qua payments.order_id
+function makeVariantCode(base: number) {
+  const suffix = Date.now() % 1000;      // 3 chữ số dao động theo thời gian
+  return base * 1000 + suffix;           // 48 -> 48000..48099
+}
+
+async function createPayOSLink(payosOrderCode: number, amount: number, description?: string) {
+  const payload: Record<string, unknown> = {
+    orderCode: payosOrderCode,
+    amount,
+    description: description ?? `SALART - Đơn ${payosOrderCode}`,
+  };
+  if (PAYOS_RETURN_URL) payload.returnUrl = PAYOS_RETURN_URL;
+  if (PAYOS_CANCEL_URL) payload.cancelUrl = PAYOS_CANCEL_URL;
+
+  const r = await fetch("https://api-merchant.payos.vn/v2/payment-requests", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": PAYOS_CLIENT_ID,
+      "x-api-key": PAYOS_API_KEY,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, data };
+}
+
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST")   return json({ error: "ONLY_POST" }, 405);
+
   try {
-    if (req.method !== "POST") {
-      return new Response("Only POST", { status: 405 });
+    const body = (await req.json().catch(() => ({}))) as Req;
+
+    // Chuẩn hoá tham số
+    const baseCode = Number(body.orderCode);
+    const amt = Math.round(Number(body.amount));
+    const desc = (body.description || "").toString().slice(0, 200);
+    const forceNew = Boolean(body.forceNew);
+
+    if (!Number.isFinite(baseCode) || baseCode <= 0 || !Number.isFinite(amt) || amt <= 0) {
+      return json({ error: "INVALID_PARAMS", detail: { orderCode: body.orderCode, amount: body.amount } }, 400);
     }
 
-    // Bảo vệ đơn giản cho demo (không bắt buộc)
-    if (DEMO_SECRET) {
-      const got = req.headers.get("x-demo-secret") || "";
-      if (got !== DEMO_SECRET) {
-        return Response.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
-      }
+    // Nếu forceNew -> dùng mã biến thể ngay
+    let codeToUse = forceNew ? makeVariantCode(baseCode) : baseCode;
+
+    // 1) Gọi PayOS
+    let { ok, data } = await createPayOSLink(codeToUse, amt, desc);
+
+    // 2) Nếu báo "đơn tồn tại", tự dùng mã biến thể và thử lại 1 lần (khi client chưa gửi forceNew)
+    const msg = String(data?.desc || data?.message || "");
+    const isExists =
+      /đơn.*tồn tại/i.test(msg) || /order.*exist/i.test(msg) ||
+      data?.code === "E018" || data?.code === "order_exists";
+
+    if (!ok && isExists && !forceNew) {
+      codeToUse = makeVariantCode(baseCode);
+      const retry = await createPayOSLink(codeToUse, amt, desc);
+      ok = retry.ok; data = retry.data;
     }
 
-    const body = (await req.json().catch(() => ({}))) as Body;
-    const orderId = Number(body?.order_id);
-    if (!Number.isFinite(orderId)) {
-      return Response.json({ ok: false, error: "INVALID_ORDER_ID" }, { status: 400 });
+    if (!ok) {
+      // Trả về nguyên thông báo (để UI hiện toast/alert chuẩn)
+      return json({
+        error: data?.desc || data?.message || "PAYOS_ERROR",
+        data,
+      }, 400);
     }
 
-    // 1) Lấy trạng thái hiện tại
-    const { data: o, error: e0 } = await admin
-      .from("orders")
-      .select("*")
-      .eq("id", orderId)
-      .maybeSingle();
+    const checkoutUrl =
+      data?.data?.checkoutUrl ?? data?.checkoutUrl ?? data?.url ?? null;
+    const qrCodeUrl =
+      data?.data?.qrCode ?? data?.qrCode ?? data?.data?.qr_content ?? null;
+    const paymentLinkId =
+      data?.data?.paymentLinkId ?? data?.paymentLinkId ?? data?.data?.id ?? null;
 
-    if (e0) throw e0;
-    if (!o) {
-      return Response.json({ ok: false, error: "ORDER_NOT_FOUND" }, { status: 404 });
-    }
-
-    // Idempotent: nếu đã paid/paid_demo thì trả OK luôn
-    const alreadyPaid = ["paid", "paid_demo"].includes(String(o.payment_status || ""));
-    if (alreadyPaid) {
-      return Response.json({ ok: true, already: true, status: o.payment_status });
-    }
-
-    // (Tuỳ chọn) Kiểm tra amount. Nếu DB bạn có cột total/grand_total thì bật đoạn dưới
-    // const want = Number(body?.amount_vnd);
-    // const total = Number(o?.grand_total_vnd ?? o?.total_vnd ?? 0);
-    // if (want && total && want !== total) {
-    //   return Response.json({ ok:false, error:"AMOUNT_MISMATCH", total }, { status: 400 });
-    // }
-
-    // 2) Đánh dấu đã thanh toán (demo)
-    const method = body?.force_method || "bank_transfer";
-    const { error: e1 } = await admin
-      .from("orders")
-      .update({
-        payment_method: method,
-        payment_status: "paid_demo",
-        paid_at: new Date().toISOString(),
-      })
-      .eq("id", orderId);
-    if (e1) throw e1;
-
-    // 3) (Tuỳ chọn) Trừ kho theo đơn bằng RPC nếu bạn đã tạo
-    //    Nếu chưa có function consume_stock_for_order(order_id bigint), bỏ qua block này.
+    // 3) Ghi/ cập nhật payments idempotent theo order_id (map về đơn gốc)
     try {
-      // idempotent: function của bạn nên tự bảo vệ nếu đã trừ trước đó
-      await admin.rpc("consume_stock_for_order", { order_id: orderId });
-    } catch (_e) {
-      // cho demo: bỏ qua lỗi trừ kho
+      await sb.from("payments").upsert({
+        order_id: baseCode,
+        amount_vnd: amt,
+        method: "bank",
+        status: "pending",
+        gateway: "payos",
+        ref: String(paymentLinkId ?? codeToUse), // lưu id/mã biến thể để tra cứu
+        checkout_url: checkoutUrl ?? null,
+      }, { onConflict: "order_id" }).select("order_id").maybeSingle();
+    } catch (e) {
+      console.log("payments upsert error:", (e as any)?.message || e);
+      // không fail toàn bộ chỉ vì bảng thiếu cột
     }
 
-    return Response.json({ ok: true, order_id: orderId, status: "paid_demo" });
-  } catch (e) {
-    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    // (an toàn) Cập nhật đơn sang pending_confirm nếu client chưa làm
+    try {
+      await sb.from("orders")
+        .update({ payment_method: "bank", payment_status: "pending_confirm" })
+        .eq("id", baseCode);
+    } catch (_) {}
+
+    return json({
+      data: {
+        checkoutUrl,
+        qrCode: qrCodeUrl,
+        paymentLinkId,
+        payOrderCode: codeToUse, // mã PayOS thực tế đã dùng để tạo phiên
+      },
+    });
+  } catch (e: any) {
+    return json({ error: e?.message ?? "INTERNAL_ERROR" }, 500);
   }
 });

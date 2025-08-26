@@ -1,19 +1,18 @@
 // app/pay/[id].tsx
 import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, Image, Alert, ActivityIndicator, ScrollView } from "react-native";
+import { View, Text, Pressable, Alert, ActivityIndicator, ScrollView, AppState } from "react-native";
+import { Image } from "expo-image";
+import QRCode from "react-native-qrcode-svg";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
-import * as WebBrowser from "expo-web-browser";
 import { supabase } from "../../lib/supabase";
 import { clearCart } from "../../lib/cart";
 
 const C = { bg:"#F6F2EA", panel:"#FFFFFF", text:"#111827", sub:"#6B7280", line:"#E5E7EB", dark:"#111827" };
 const fmtVnd = (n=0)=>{ try{ return n.toLocaleString("vi-VN")+" đ"; }catch{ return `${Math.round(n)} đ`; }};
 
-// Fallback QR VietQR nếu cổng lỗi/chưa có link
-const BANK_SHORT = "TCB";
-const ACCOUNT_NO  = "19022024724012";
-const ACCOUNT_NAME = "SALArt Vietnam";
+// Thời hạn QR 15 phút
+const EXPIRE_MS = 15 * 60 * 1000;
 
 type TOrder = {
   id: number;
@@ -41,14 +40,17 @@ export default function PayScreen(){
   }, [rawAmount, dbOrder]);
 
   const [tab, setTab] = useState<"bank"|"cod">("bank");
-  const [saving, setSaving] = useState(false);   // COD
-  const [paying, setPaying] = useState(false);   // BANK
+  const [saving, setSaving] = useState(false);         // COD
+  const [loadingQR, setLoadingQR] = useState(false);   // BANK (load QR)
 
-  // Đếm ngược 15'
-  const [left, setLeft] = useState(15*60);
-  useEffect(()=>{ const t=setInterval(()=>setLeft(s=>Math.max(0,s-1)),1000); return ()=>clearInterval(t); },[]);
-  const mm = String(Math.floor(left/60)).padStart(2,"0");
-  const ss = String(left%60).padStart(2,"0");
+  // ===== Hạn QR
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [nowTs, setNowTs] = useState(Date.now());
+  useEffect(()=>{ const t=setInterval(()=>setNowTs(Date.now()),1000); return ()=>clearInterval(t); },[]);
+  const expired = expiresAt !== null && nowTs >= expiresAt;
+  const leftSec = useMemo(()=> expiresAt ? Math.max(0, Math.floor((expiresAt - nowTs)/1000)) : 0, [expiresAt, nowTs]);
+  const mm = String(Math.floor(leftSec/60)).padStart(2,"0");
+  const ss = String(leftSec%60).padStart(2,"0");
 
   // Lấy đơn từ DB + đảm bảo có order_code
   useEffect(()=>{
@@ -87,18 +89,15 @@ export default function PayScreen(){
     return `SAL_${String(Number.isFinite(orderId) ? orderId : "").padStart(6,"0")}`;
   }, [dbOrder, orderId]);
 
-  // Fallback QR VietQR
-  const qrUrlFallback = useMemo(()=>{
-    const info = encodeURIComponent(`Thanh toan don hang #${orderCode}`);
-    const name = encodeURIComponent(ACCOUNT_NAME);
-    const amt = Math.max(0, Math.round(total));
-    return `https://img.vietqr.io/image/${BANK_SHORT}-${ACCOUNT_NO}-qr_only.png?amount=${amt}&addInfo=${info}&accountName=${name}`;
-  }, [total, orderCode]);
+  // QR từ PayOS
+  const [qrUrl, setQrUrl] = useState<string | null>(null);       // URL ảnh QR (nếu PayOS trả URL)
+  const [qrContent, setQrContent] = useState<string | null>(null); // Chuỗi payload QR (nếu PayOS trả chuỗi)
 
-  // QR từ cổng (nếu có)
-  const [gatewayQr, setGatewayQr] = useState<string | null>(null);
+  // 👉 Thông tin test: số tiền trên QR khác tổng đơn
+  const [testInfo, setTestInfo] = useState<{ effective: number; original: number } | null>(null);
+  const amountOnQr = useMemo(()=> testInfo?.effective ?? Math.round(total), [testInfo, total]);
 
-  // Realtime → tự về Bill (✅ xoá giỏ trước khi điều hướng)
+  // Realtime → tự về Bill
   const [payStatus, setPayStatus] = useState<string|null>(null);
   useEffect(()=>{
     if (!Number.isFinite(orderId)) return;
@@ -123,6 +122,8 @@ export default function PayScreen(){
             if (s === "paid" || s === "paid_demo") {
               try { clearCart?.(); } catch {}
               router.replace(`/bill/${orderId}`);
+            } else if (s === "canceled" || s === "expired" || s === "failed") {
+              router.replace(`/bill/${orderId}`);
             }
           }
         )
@@ -132,34 +133,24 @@ export default function PayScreen(){
     return ()=>{ try{ ch && supabase.removeChannel(ch); }catch{} };
   }, [orderId]);
 
-  // ===== Fallback: POLLING trạng thái mỗi 4s (✅ xoá giỏ trước khi điều hướng)
-  const [checking, setChecking] = useState(false);
-  async function checkNow(){
-    if (!Number.isFinite(orderId)) return;
-    try{
-      setChecking(true);
-      const { data, error } = await supabase
-        .from("orders")
-        .select("payment_status")
-        .eq("id", orderId)
-        .maybeSingle();
-      if (error) throw error;
-      const s = data?.payment_status ? String(data.payment_status) : null;
-      if (s) setPayStatus(s);
-      if (s === "paid" || s === "paid_demo") {
-        try { clearCart?.(); } catch {}
-        router.replace(`/bill/${orderId}`);
+  // Khi app trở lại foreground -> kiểm tra 1 lần
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (s) => {
+      if (s === 'active') {
+        const { data } = await supabase.from('orders').select('payment_status').eq('id', orderId).maybeSingle();
+        const st = data?.payment_status;
+        if (st === "paid" || st === "paid_demo") {
+          clearCart?.();
+          router.replace(`/bill/${orderId}`);
+        } else if (st === "canceled" || st === "expired" || st === "failed") {
+          router.replace(`/bill/${orderId}`);
+        }
       }
-    }catch(e){ /* noop */ }
-    finally{ setChecking(false); }
-  }
-  useEffect(()=>{
-    if (!Number.isFinite(orderId)) return;
-    const itv = setInterval(checkNow, 4000);
-    return ()=>clearInterval(itv);
+    });
+    return () => sub.remove();
   }, [orderId]);
 
-  // ===== Helpers ghi nhận payments idempotent
+  // ===== Helpers payments
   async function upsertPayment(record: {
     method: "bank" | "cod",
     status: "pending" | "paid" | "failed",
@@ -203,65 +194,116 @@ export default function PayScreen(){
     });
   }
 
-  // ===== Nút: Thanh toán VietQR (PayOS)
-  async function onPayVietQR(){
+  // ===== Tạo link PayOS → lấy QR (URL hoặc payload), KHÔNG mở web
+  async function createPayQR(forceNew = false){
     if (!Number.isFinite(orderId)) { Alert.alert("Lỗi", "Không xác định được mã đơn."); return; }
     if (!Number.isFinite(total) || total <= 0) { Alert.alert("Lỗi", "Số tiền không hợp lệ."); return; }
     try{
-      if (paying) return;
-      setPaying(true);
+      if (loadingQR) return;
+      setLoadingQR(true);
 
       await ensureOrderBeforePayment();
 
       const { data, error } = await supabase.functions.invoke<any>("payos-create-payment", {
         body: {
-          orderCode: orderId,
+          orderCode: orderId,          // PayOS yêu cầu SỐ
+          displayCode: orderCode,      // gửi kèm mã SAL_... nếu server cần
           amount: Math.round(total),
           description: `SALART - Đơn ${orderCode}`,
+          forceNew,
         }
       });
-      if (error) throw error;
 
-      const checkoutUrl =
-        data?.data?.checkoutUrl ??
-        data?.checkoutUrl ??
-        data?.url;
+      if (error) {
+        console.log("payos-create-payment ERROR ctx:", (error as any)?.context);
+        const ctx = (error as any)?.context ?? {};
+        const status = ctx?.status;
+        let reason = "";
+        const body = ctx?.body;
 
-      const qrCodeUrl =
-        data?.data?.qrCode ??
-        data?.qrCode ??
-        data?.data?.qr_content;
-
-      if (checkoutUrl) {
-        await WebBrowser.openBrowserAsync(checkoutUrl);
+        if (typeof body === "string" && body.trim()) {
+          try {
+            const j = JSON.parse(body);
+            reason = j?.error || j?.message || j?.desc || "";
+          } catch {
+            reason = body.slice(0, 300);
+          }
+        }
+        if (!reason) reason = "Không gọi được cổng thanh toán.";
+        Alert.alert("Thông báo", `${reason}${status ? ` (HTTP ${status})` : ""}`);
         return;
       }
-      if (qrCodeUrl) {
-        setGatewayQr(qrCodeUrl);
+
+      const payload = data || {};
+      if (payload?.ok === false) {
+        const reason =
+          payload?.error ||
+          payload?.raw?.desc ||
+          payload?.raw?.message ||
+          "Không nhận được QR từ cổng.";
+        Alert.alert("Thông báo", String(reason));
         return;
       }
 
-      const reason =
-        data?.error ||
-        data?.desc ||
-        data?.message ||
-        (data?.code && data.code !== "00" ? `Mã lỗi: ${data.code}` : "");
+      // Lấy URL ảnh hoặc chuỗi payload
+      const anyQr =
+        payload?.data?.qrCodeUrl ?? payload?.qrCodeUrl ??
+        payload?.data?.qrImageUrl?? payload?.qrImageUrl ??
+        payload?.data?.qrCode    ?? payload?.qrCode ??
+        payload?.data?.qr_content?? payload?.qr_content ??
+        null;
 
-      console.log("payos-create-payment resp:", JSON.stringify(data, null, 2));
-      Alert.alert(
-        "Thông báo",
-        reason
-          ? `Không nhận được link thanh toán: ${reason}`
-          : "Không nhận được link thanh toán, vui lòng quét QR bên dưới."
-      );
+      // test-mode: amount hiệu lực khác tổng đơn
+      const eff = Number(payload?.data?.effectiveAmount ?? 0);
+      const orig = Math.round(total);
+      if (Number.isFinite(eff) && eff > 0 && eff !== orig) {
+        setTestInfo({ effective: eff, original: orig });
+      } else {
+        setTestInfo(null);
+      }
+
+      if (typeof anyQr === "string") {
+        // Nếu là URL ảnh hoặc data:image -> hiển thị bằng Image
+        if (/^https?:\/\//i.test(anyQr) || anyQr.startsWith("data:image")) {
+          setQrUrl(anyQr);
+          setQrContent(null);
+          setExpiresAt(Date.now() + EXPIRE_MS);
+          return;
+        }
+        // Còn lại coi như là "payload" -> vẽ QR trực tiếp
+        setQrContent(anyQr);
+        setQrUrl(null);
+        setExpiresAt(Date.now() + EXPIRE_MS);
+        return;
+      }
+
+      Alert.alert("Thông báo", "Không nhận được QR từ PayOS. Vui lòng thử lại.");
     }catch(e:any){
-      Alert.alert("Lỗi", e?.message ?? "Không tạo được link thanh toán. Vui lòng quét QR bên dưới.");
+      Alert.alert("Lỗi", e?.message ?? "Không tạo được QR. Vui lòng thử lại.");
     }finally{
-      setPaying(false);
+      setLoadingQR(false);
     }
   }
 
-  // ===== Nút: Xác nhận COD (đã có clearCart)
+  // Gọi tạo QR ngay khi vào màn
+  useEffect(() => {
+    if (Number.isFinite(orderId)) createPayQR(false);
+  }, [orderId]);
+
+  // Nút: Tạo lại QR khi hết hạn
+  async function handleRecreateQR(){
+    try {
+      setQrUrl(null);
+      setQrContent(null);
+      setExpiresAt(null);
+      setTestInfo(null);
+      await createPayQR(true);
+    } catch (e:any) {
+      Alert.alert("Lỗi", e?.message ?? "Không tạo lại được QR.");
+    }
+  }
+
+  // Nút: Xác nhận COD
   async function confirmCOD(){
     if (!Number.isFinite(orderId)) { Alert.alert("Lỗi", "Không xác định được mã đơn."); return; }
     setSaving(true);
@@ -301,7 +343,7 @@ export default function PayScreen(){
   const hint =
     payStatus === "pending_confirm" ? "Hệ thống đã ghi nhận, đang chờ xác nhận giao dịch từ ngân hàng…"
     : payStatus === "paid" || payStatus === "paid_demo" ? "Đã thanh toán"
-    : "Quét QR hoặc bấm 'Thanh toán VietQR'. Hệ thống sẽ tự cập nhật khi ngân hàng xác nhận thành công.";
+    : "Quét mã VietQR. Hệ thống sẽ tự cập nhật khi ngân hàng xác nhận thành công.";
 
   if (!Number.isFinite(orderId)) {
     return (
@@ -354,42 +396,60 @@ export default function PayScreen(){
         {tab==="bank" ? (
           <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:16 }}>
             <Text style={{ textAlign:"center", color:C.sub }}>{hint}</Text>
-            <Text style={{ textAlign:"center", fontWeight:"900", color:C.text, marginTop:6 }}>{ACCOUNT_NAME}</Text>
-            <Text style={{ textAlign:"center", color:C.text, fontWeight:"800", marginTop:2 }}>{ACCOUNT_NO}</Text>
-            <Text style={{ textAlign:"center", color:C.sub, marginTop:6 }}>Mã QR còn hiệu lực trong {mm}:{ss}</Text>
 
-            <View style={{ alignItems:"center", marginTop:14 }}>
-              <Image source={{ uri: gatewayQr ?? qrUrlFallback }} style={{ width:220, height:220 }} resizeMode="contain" />
+            <Text style={{ textAlign:"center", color:C.sub, marginTop:6 }}>
+              {expiresAt === null
+                ? (loadingQR ? "Đang tạo mã QR…" : "Đang chờ QR từ PayOS…")
+                : expired ? "Mã QR đã hết hạn"
+                : <>Mã QR còn hiệu lực trong {mm}:{ss}</>}
+            </Text>
+
+            {/* Banner hết hạn + CTA tạo lại */}
+            {expired && (
+              <View style={{ padding:12, borderRadius:10, backgroundColor:"#FFF4ED", borderWidth:1, borderColor:"#FFD8BF", marginTop:12 }}>
+                <Text style={{ color:"#B35300", marginBottom:8, textAlign:"center" }}>
+                  Mã QR đã hết hạn sau 15 phút.
+                </Text>
+                <Pressable
+                  onPress={handleRecreateQR}
+                  style={{ paddingVertical:12, borderRadius:10, backgroundColor:"#111827", alignItems:"center" }}>
+                  <Text style={{ color:"#fff", fontWeight:"600" }}>Tạo lại QR</Text>
+                </Pressable>
+              </View>
+            )}
+
+            {/* Banner test: amount trên QR khác tổng đơn */}
+            {testInfo && (
+              <View style={{ padding:12, borderRadius:10, backgroundColor:"#FEF9C3", borderWidth:1, borderColor:"#FDE68A", marginTop:12 }}>
+                <Text style={{ color:"#92400E", textAlign:"center" }}>
+                  Đang test luồng thật: QR dùng {fmtVnd(testInfo.effective)} thay vì tổng đơn {fmtVnd(testInfo.original)}.
+                </Text>
+              </View>
+            )}
+
+            <View style={{ alignItems:"center", marginTop:14, minHeight:236, justifyContent:"center" }}>
+              {loadingQR && <ActivityIndicator />}
+              {!loadingQR && qrUrl && (
+                <Image source={{ uri: qrUrl }} style={{ width:220, height:220, borderRadius:12 }} contentFit="contain" />
+              )}
+              {!loadingQR && !qrUrl && qrContent && (
+                <QRCode value={qrContent} size={220} />
+              )}
+              {!loadingQR && !qrUrl && !qrContent && (
+                <Text style={{ color:C.sub }}>Không tải được QR. Vui lòng bấm “Tạo lại QR”.</Text>
+              )}
             </View>
 
             <View style={{ alignItems:"center", marginTop:12 }}>
-              <Text style={{ color:C.sub }}>Số tiền</Text>
-              <Text style={{ color:C.text, fontSize:28, fontWeight:"900" }}>{fmtVnd(total)}</Text>
+              <Text style={{ color:C.sub }}>{testInfo ? "Số tiền trên QR" : "Số tiền"}</Text>
+              <Text style={{ color:C.text, fontSize:28, fontWeight:"900" }}>{fmtVnd(amountOnQr)}</Text>
+              {testInfo && (
+                <Text style={{ color:C.sub, marginTop:4 }}>Tổng đơn: {fmtVnd(testInfo.original)}</Text>
+              )}
               <Text style={{ color:C.sub, marginTop:6 }}>Nội dung: {orderCode}</Text>
             </View>
 
-            <Pressable
-              disabled={paying}
-              onPress={onPayVietQR}
-              style={{ marginTop:16, backgroundColor:C.dark, paddingVertical:14, borderRadius:14, alignItems:"center", opacity: paying ? 0.6 : 1 }}
-            >
-              {paying ? <ActivityIndicator color="#fff" /> : <Text style={{ color:"#fff", fontWeight:"800" }}>Thanh toán VietQR</Text>}
-            </Pressable>
-
-            {/* Fallback thủ công: kiểm tra ngay trạng thái */}
-            <Pressable
-              disabled={checking}
-              onPress={checkNow}
-              style={{ marginTop:10, paddingVertical:10, borderRadius:12, alignItems:"center", borderWidth:1, borderColor:C.line, backgroundColor:"#fff", opacity: checking ? 0.6 : 1 }}
-            >
-              {checking ? <ActivityIndicator /> : (
-                <Text style={{ color:C.text, fontWeight:"700" }}>
-                  <Feather name="refresh-cw" size={14} />  Kiểm tra trạng thái
-                </Text>
-              )}
-            </Pressable>
-
-            {/* Không dùng nút “Tôi đã chuyển khoản” — chờ webhook/realtime/poll */}
+            {/* KHÔNG có nút “Thanh toán VietQR” và KHÔNG có nút “Kiểm tra trạng thái” */}
           </View>
         ) : (
           <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:16 }}>
