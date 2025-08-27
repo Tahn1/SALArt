@@ -8,9 +8,18 @@ import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import * as Location from "expo-location";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "../../lib/supabase";
-import { useCart, removeLine, removeAddon, setAddonQty } from "../../lib/cart";
+import { useCart, removeLine, removeAddon, setAddonQty, cancelActiveOrderIfAny } from "../../lib/cart"; // ⬅ thêm cancelActiveOrderIfAny
 import { STORE } from "../../lib/store";
 import { useRouter } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+// 🟡 Helper lưu đơn đang chờ (chỉ dùng để lưu/đọc ngầm, không hiển thị banner)
+import {
+  saveActiveOrder,
+  loadActiveOrder,
+} from "../../lib/active-order";
+
+const ORDER_KEY = "LAST_ORDER_ID"; // back-compat
 
 const GEOAPIFY_KEY = process.env.EXPO_PUBLIC_GEOAPIFY_KEY || "";
 
@@ -69,6 +78,43 @@ function preciseByProps(p:any){
   return hasHouse || hasPOI || goodTypes.includes(rt);
 }
 
+// ===== So sánh giỏ hiện tại và snapshot trong ActiveOrder =====
+function normAddons(arr:any[] = []) {
+  return arr.map(a => ({
+    id: String(a.id),
+    qty_units: Number(a.qty_units || 0),
+    extra_price_vnd_per_unit: Number(a.extra_price_vnd_per_unit || 0),
+  })).sort((x,y)=>x.id.localeCompare(y.id));
+}
+function normSnapshotItems(list:any[] = []) {
+  // list có thể đến từ snapshot đã lưu hoặc tự build từ cart
+  return list.map(it => ({
+    name: String(it.name || ""),
+    qty: Number(it.qty || 0),
+    base_price_vnd: Number(it.base_price_vnd || 0),
+    addons: normAddons(it.addons || []),
+  })).sort((a,b)=>{
+    const ka = `${a.name}|${a.base_price_vnd}|${a.qty}|${a.addons.map(z=>`${z.id}:${z.qty_units}:${z.extra_price_vnd_per_unit}`).join(",")}`;
+    const kb = `${b.name}|${b.base_price_vnd}|${b.qty}|${b.addons.map(z=>`${z.id}:${z.qty_units}:${z.extra_price_vnd_per_unit}`).join(",")}`;
+    return ka.localeCompare(kb);
+  });
+}
+function buildSnapshotFromCart(items:any[]) {
+  return items.map((it:any)=>({
+    name: it.name,
+    qty: it.qty,
+    base_price_vnd: it.base_price_vnd,
+    addons: (it.addons ?? []).map((a:any)=>({
+      id:a.id, name:a.name, qty_units:a.qty_units, extra_price_vnd_per_unit:a.extra_price_vnd_per_unit
+    })),
+  }));
+}
+function sameCartSnapshot(a:any[], b:any[]) {
+  const A = JSON.stringify(normSnapshotItems(a));
+  const B = JSON.stringify(normSnapshotItems(b));
+  return A === B;
+}
+
 export default function CartScreen(){
   const insets = useSafeAreaInsets();
   const tabH   = useBottomTabBarHeight();
@@ -82,7 +128,7 @@ export default function CartScreen(){
   const [destCoords,setDestCoords] = useState<{lat:number;lng:number}|null>(null);
   const [destPrecise,setDestPrecise] = useState<boolean>(false);
 
-  // ===== Store coords (fallback: STORE.lat/lng → Geoapify → expo-location) =====
+  // ===== Store coords =====
   const [storeCoords,setStoreCoords] = useState<{lat:number;lng:number}|null>(null);
   const [storeGeoStatus,setStoreGeoStatus] = useState<"idle"|"ok"|"error">("idle");
 
@@ -264,7 +310,6 @@ export default function CartScreen(){
     if (addonIds.length === 0) { setAddonMeta({}); return; }
     setAddonMetaLoading(true);
     try{
-      // cần FK: ingredient_addon_config(ingredient_id) -> ingredients_nutrition(id)
       const { data, error } = await supabase
         .from("ingredients_nutrition")
         .select("id, stock_g, ingredient_addon_config(step_g, min_steps, max_steps)")
@@ -302,9 +347,41 @@ export default function CartScreen(){
   // ===== Place order =====
   async function placeOrder(){
     if(items.length===0) return;
+
+    // 🔁 Nếu còn đơn chờ → CHỈ tiếp tục khi giỏ HIỆN TẠI GIỐNG snapshot; nếu khác → hủy & tạo mới
+    try {
+      const ao = await loadActiveOrder();
+      const idCandidate = ao?.orderId ?? Number(await AsyncStorage.getItem(ORDER_KEY));
+      if (Number.isFinite(idCandidate)) {
+        const { data: exist } = await supabase
+          .from("orders")
+          .select("id, payment_status")
+          .eq("id", Number(idCandidate))
+          .maybeSingle();
+        const st = String(exist?.payment_status || "");
+        const isTerminal = ["paid","paid_demo","canceled","expired","failed"].includes(st);
+
+        if (exist && !isTerminal) {
+          const snapItems = ao?.snapshot?.items || [];
+          const curItems = buildSnapshotFromCart(items);
+          const same = sameCartSnapshot(snapItems, curItems);
+
+          if (same) {
+            // Tiếp tục đơn cũ vì giỏ không đổi
+            router.replace({ pathname: "/bill/[id]", params: { id: String(idCandidate) } });
+            return;
+          }
+
+          // Giỏ đã thay đổi → hủy đơn cũ & bỏ con trỏ để tạo đơn mới
+          try { await cancelActiveOrderIfAny(); } catch {}
+          try { await AsyncStorage.removeItem(ORDER_KEY); } catch {}
+        }
+      }
+    } catch {}
+
     if(overCapacity){ Alert.alert("Vượt công suất","Một số món vượt số suất còn lại."); return; }
 
-    // Chặn vượt kho add-on (phòng trường hợp meta chưa load trước đó)
+    // Chặn vượt kho add-on
     for (const idStr of Object.keys(reservedStepsByIng)) {
       const id = Number(idStr);
       const meta = addonMeta[id] ?? { step_g:10, min_steps:0, max_steps:null, stock_g:0 };
@@ -334,7 +411,7 @@ export default function CartScreen(){
         }
       } else {
         if (!isDetailedAddress(shippingAddress)) {
-          Alert.alert("Địa chỉ chưa đủ chi tiết","Vui lòng ghi SỐ NHÀ + TÊN ĐƯỜNG hoặc TÊN TOÀ NHÀ/CÔNG TY.");
+          Alert.alert("Địa chỉ chưa đủ chi tiết","Vui lòng ghi SỐ NHÀ + TÊN ĐƯỜNG hoặc TÊN TÒA NHÀ/CÔNG TY.");
           return;
         }
         try {
@@ -365,7 +442,7 @@ export default function CartScreen(){
         DEST: destCoords,
         DEST_PRECISE: destPrecise,
       };
-      const p_note = meta; // <-- gửi JSON, KHÔNG stringify
+      const p_note = meta; // gửi JSON, KHÔNG stringify
 
       const { data, error } = await supabase.rpc("create_order",{ p_note, p_lines });
       if(error) throw error;
@@ -373,7 +450,7 @@ export default function CartScreen(){
       const orderId = Number(data);
       if (!Number.isFinite(orderId)) throw new Error("ORDER_ID_INVALID");
 
-      // Snapshot sang màn Bill
+      // 🔒 Lưu “đơn đang chờ” (persist, không hiển thị banner)
       const summary = {
         orderId,
         createdAt: Date.now(),
@@ -385,16 +462,12 @@ export default function CartScreen(){
         subTotal,
         grandTotal,
         store: { id: STORE.id, name: STORE.name, address: STORE.address },
-        items: items.map((it:any) => ({
-          name: it.name,
-          qty: it.qty,
-          base_price_vnd: it.base_price_vnd,
-          addons: (it.addons ?? []).map((a:any)=>({
-            id:a.id, name:a.name, qty_units:a.qty_units, extra_price_vnd_per_unit:a.extra_price_vnd_per_unit
-          }))
-        })),
+        items: buildSnapshotFromCart(items), // đồng nhất format để so sánh lần sau
       };
+      await saveActiveOrder({ orderId, createdAt: Date.now(), snapshot: summary });
+      try { await AsyncStorage.setItem(ORDER_KEY, String(orderId)); } catch {}
 
+      // Điều hướng: luôn sang BILL
       router.replace({
         pathname: "/bill/[id]",
         params: {
@@ -489,7 +562,7 @@ export default function CartScreen(){
                         <View key={`${item.line_id}-${a.id}`} style={{ flexDirection:"row", alignItems:"center", paddingHorizontal:10, paddingVertical:6, borderRadius:999, borderWidth:1, borderColor:C.line, backgroundColor:"#fff", marginRight:6, marginBottom:6, gap:6 }}>
                           <View style={{ gap:2 }}>
                             <Text style={{ color:C.text, fontSize:12, fontWeight:"700" }}>{a.name}</Text>
-                            {addonMetaLoading ? null : (
+                            {!addonMetaLoading && (
                               <Text style={{ fontSize:10, color: showOut ? C.danger : "#059669" }}>
                                 {showOut ? "Hết" : (remainForLine>0 ? `Còn +${remainForLine} bước` : "Đã tối đa")}
                               </Text>
@@ -580,28 +653,6 @@ export default function CartScreen(){
                 style={{ minHeight:64, paddingHorizontal:12, paddingVertical:10, borderRadius:10, borderWidth:1, borderColor: C.line, backgroundColor:"#fff", color:C.text, textAlignVertical:"top" }}
                 placeholder="Số nhà + tên đường, hoặc tên tòa nhà/công ty…"
               />
-
-              {/* Nút đổi địa chỉ khi đã chọn gợi ý */}
-              {GEOAPIFY_KEY && suppressSuggest && destPrecise && (
-                <Pressable
-                  onPress={()=>{
-                    setSuppressSuggest(false);
-                    setDestPrecise(false);
-                    setDestCoords(null);
-                    addressRef.current?.focus();
-                  }}
-                  style={{ alignSelf:"flex-start", marginTop:6, paddingHorizontal:8, paddingVertical:6, borderRadius:8, borderWidth:1, borderColor:C.line, backgroundColor:"#fff" }}
-                >
-                  <Text style={{ fontSize:12, fontWeight:"700", color:C.text }}>Đổi địa chỉ</Text>
-                </Pressable>
-              )}
-
-              {/* Cảnh báo inline khi nhập tay chưa đủ chi tiết */}
-              {!GEOAPIFY_KEY && !!shippingAddress.trim() && !isDetailedAddress(shippingAddress) && (
-                <Text style={{ color:C.danger, marginTop:6, fontSize:12 }}>
-                  Địa chỉ chưa đủ chi tiết. Vui lòng ghi SỐ NHÀ + TÊN ĐƯỜNG hoặc TÊN TÒA NHÀ/CÔNG TY.
-                </Text>
-              )}
 
               {/* Suggestions (Geoapify) */}
               {GEOAPIFY_KEY ? (

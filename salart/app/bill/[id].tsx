@@ -1,9 +1,13 @@
 // app/bill/[id].tsx
-import React, { useMemo, useEffect, useState } from "react";
-import { View, Text, ScrollView, Pressable } from "react-native";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import React, { useMemo, useEffect, useState, useRef } from "react";
+import { View, Text, ScrollView, Pressable, BackHandler } from "react-native";
+import { Stack, useLocalSearchParams, useRouter, useNavigation } from "expo-router";
 import { supabase } from "../../lib/supabase";
 import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { cancelActiveOrderIfAny } from "../../lib/cart";
+import { clearActiveOrder } from "../../lib/active-order";
+const ORDER_KEY = "LAST_ORDER_ID";
 
 const C = {
   bg:"#F6F2EA", panel:"#FFFFFF", text:"#111827", sub:"#6B7280",
@@ -13,6 +17,7 @@ const fmtVnd = (n=0)=>{ try{ return n.toLocaleString("vi-VN")+" đ"; }catch{ ret
 
 export default function BillScreen(){
   const router = useRouter();
+  const navigation = useNavigation();
   const params = useLocalSearchParams() as { id?:string; summary?:string };
   const orderId = Number(params?.id);
 
@@ -21,6 +26,23 @@ export default function BillScreen(){
     if (!params.summary) return null;
     return JSON.parse(decodeURIComponent(String(params.summary)));
   }catch{ return null; }}, [params.summary]);
+
+  // ---- Cleanup pointers when leaving ----
+  const cleanedRef = useRef(false);
+  const cleanupPointers = async () => {
+    if (cleanedRef.current) return;
+    cleanedRef.current = true;
+    try { await cancelActiveOrderIfAny(); } catch {}
+    try { await clearActiveOrder(); } catch {}
+    try { await AsyncStorage.removeItem(ORDER_KEY); } catch {}
+    setTimeout(()=>{ cleanedRef.current = false; }, 1000);
+  };
+
+  useEffect(() => {
+    const unsub = navigation.addListener("beforeRemove", () => { cleanupPointers(); });
+    const backSub = BackHandler.addEventListener("hardwareBackPress", () => { cleanupPointers(); return false; });
+    return () => { try { unsub(); } catch {} try { backSub.remove(); } catch {} };
+  }, [navigation]);
 
   // ---- ETA cho trạng thái chưa thanh toán ----
   const eta = useMemo(()=>{
@@ -38,20 +60,29 @@ export default function BillScreen(){
   const grandTotal = snap?.grandTotal ?? (subTotal + shippingFee + vat);
   const promotions = Array.isArray(snap?.promotions) ? snap?.promotions : [];
 
+  // ===== FIX: key duy nhất, không dùng tên món =====
   const items = Array.isArray(snap?.items) ? snap.items : [];
-  const lines = items.flatMap((it:any) => {
-    const base = [{ key:`dish-${it.name}`, text:`${it.name}`,
-      price:(it.base_price_vnd ?? 0) * (it.qty ?? 1),
-      right: it.qty > 1 ? `× ${it.qty}` : undefined }];
-    const addons = (it.addons ?? []).map((a:any, idx:number)=>({
-      key:`addon-${it.name}-${idx}`,
-      text:`Topping — ${a.name}`,
-      price:(a.qty_units ?? 0) * (a.extra_price_vnd_per_unit ?? 0) * (it.qty ?? 1),
-      right:(a.qty_units ?? 0) > 0 ? `+${a.qty_units}` : undefined,
-      sub:true
-    }));
-    return [...base, ...addons].filter(row => row.price > 0);
-  });
+  const lines = useMemo(() => {
+    return items.flatMap((it: any, idx: number) => {
+      const base = [{
+        key: `dish-${idx}`,                             // ✅ luôn duy nhất
+        text: `${it.name}`,
+        price: (it.base_price_vnd ?? 0) * (it.qty ?? 1),
+        right: it.qty > 1 ? `× ${it.qty}` : undefined
+      }];
+
+      const addons = (it.addons ?? []).map((a: any, j: number) => ({
+        key: `addon-${idx}-${j}`,                      // ✅ duy nhất theo món + thứ tự topping
+        text: `Topping — ${a.name}`,
+        price: (a.qty_units ?? 0) * (a.extra_price_vnd_per_unit ?? 0) * (it.qty ?? 1),
+        right: (a.qty_units ?? 0) > 0 ? `+${a.qty_units}` : undefined,
+        sub: true
+      }));
+
+      return [...base, ...addons].filter(row => row.price > 0);
+    });
+  }, [items]);
+  // ================================================
 
   // ---- Realtime trạng thái thanh toán ----
   const [payStatus, setPayStatus] = useState<string>("unpaid");
@@ -77,6 +108,9 @@ export default function BillScreen(){
   const paidLike = payStatus === "paid" || payStatus === "paid_demo";
   const pendingLike = payStatus === "pending_confirm";
 
+  const goHome = async () => { await cleanupPointers(); router.replace("/"); };
+  const goCart = async () => { await cleanupPointers(); router.replace("/(tabs)/cart"); };
+
   return (
     <View style={{ flex:1, backgroundColor:C.bg }}>
       <Stack.Screen
@@ -90,7 +124,6 @@ export default function BillScreen(){
       />
 
       <ScrollView contentContainerStyle={{ padding:16, paddingBottom:24 }}>
-        {/* ======= VIEW KHI ĐÃ THANH TOÁN ======= */}
         {paidLike ? (
           <View style={{ alignItems:"center", marginTop:8 }}>
             <View style={{
@@ -105,12 +138,10 @@ export default function BillScreen(){
               ĐÃ THANH TOÁN
             </Text>
 
-            {/* gợi ý nhỏ */}
             <Text style={{ marginTop:6, color:C.sub, textAlign:"center" }}>
               Cảm ơn bạn! Đơn hàng #{params.id} đã được ghi nhận.
             </Text>
 
-            {/* tổng tiền (tuỳ chọn, vẫn đẹp & ngắn gọn) */}
             {Number(grandTotal)>0 && (
               <View style={{
                 marginTop:14, paddingVertical:10, paddingHorizontal:14,
@@ -123,24 +154,19 @@ export default function BillScreen(){
               </View>
             )}
 
-            {/* CTA */}
             <View style={{ width:"100%", marginTop:20, gap:10 }}>
-              <Pressable
-                onPress={()=>router.replace("/")}
+              <Pressable onPress={goHome}
                 style={{ backgroundColor:C.ok, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
                 <Text style={{ color:"#fff", fontWeight:"800" }}>Về Trang chủ</Text>
               </Pressable>
-              <Pressable
-                onPress={()=>router.push("/(tabs)/cart")}
+              <Pressable onPress={goCart}
                 style={{ backgroundColor:"#fff", borderWidth:1, borderColor:C.line, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
                 <Text style={{ color:C.text, fontWeight:"800" }}>Xem giỏ hàng</Text>
               </Pressable>
             </View>
           </View>
         ) : (
-          /* ======= VIEW KHI CHƯA/ĐANG CHỜ THANH TOÁN — GIỮ NGUYÊN ======= */
           <>
-            {/* Banner trạng thái */}
             <View style={{ marginBottom:12 }}>
               <View style={{
                 alignSelf:"flex-start",
@@ -154,7 +180,6 @@ export default function BillScreen(){
               </View>
             </View>
 
-            {/* Thông tin nhận hàng */}
             <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:14, marginBottom:12, gap:8 }}>
               <Text style={{ color:C.sub }}>
                 {snap?.method==="delivery" ? "Nhận hàng" : "Nhận tại quầy"} <Text style={{ color:C.text, fontWeight:"800" }}>{eta}</Text>
@@ -167,7 +192,6 @@ export default function BillScreen(){
               </Text>
             </View>
 
-            {/* Chi tiết thanh toán */}
             <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:14 }}>
               <Text style={{ fontWeight:"800", color:C.text, marginBottom:8 }}>Chi tiết thanh toán</Text>
 
@@ -196,7 +220,6 @@ export default function BillScreen(){
               </Text>
             </View>
 
-            {/* CTA */}
             <View style={{ marginTop:16, gap:10 }}>
               <Pressable
                 onPress={()=>router.push({ pathname: "/pay/[id]", params: { id: String(params.id || ""), amount: String(grandTotal || 0) } })}
@@ -204,13 +227,11 @@ export default function BillScreen(){
                 <Text style={{ color:"#fff", fontWeight:"800" }}>Thanh toán</Text>
               </Pressable>
 
-              <Pressable
-                onPress={()=>router.replace("/")}
+              <Pressable onPress={goHome}
                 style={{ backgroundColor:C.ok, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
                 <Text style={{ color:"#fff", fontWeight:"800" }}>Về Trang chủ</Text>
               </Pressable>
-              <Pressable
-                onPress={()=>router.push("/(tabs)/cart")}
+              <Pressable onPress={goCart}
                 style={{ backgroundColor:"#fff", borderWidth:1, borderColor:C.line, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
                 <Text style={{ color:C.text, fontWeight:"800" }}>Xem giỏ hàng</Text>
               </Pressable>

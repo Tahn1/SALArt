@@ -1,11 +1,3 @@
-$uri = "https://lrqigquiefqhjewwobwq.supabase.co/functions/v1/demo-pay"
-$headers = @{
-  "Authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxycWlncXVpZWZxaGpld3dvYndxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ5Mjc3NDEsImV4cCI6MjA3MDUwMzc0MX0.jrIJ6N_IILpbYpCf3RlsDutyF--vhCbaWs_kd0DWLRw" 
-  "Content-Type"  = "application/json"
-}
-$body = @{ order_id = 53; amount_vnd = 171120; consume = $false; force_method = "bank" } | ConvertTo-Json
-Invoke-RestMethod -Method POST -Uri $uri -Headers $headers -Body $body
-
 $uri = "https://lrqigquiefqhjewwobwq.supabase.co/functions/v1/payos-create-payment"
 $headers = @{
   "Authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxycWlncXVpZWZxaGpld3dvYndxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ5Mjc3NDEsImV4cCI6MjA3MDUwMzc0MX0.jrIJ6N_IILpbYpCf3RlsDutyF--vhCbaWs_kd0DWLRw"
