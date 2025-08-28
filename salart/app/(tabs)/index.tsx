@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { Asset } from "expo-asset";
 
-import hero from "../../assets/home/home2.png";            // ✅ chỉ dùng 1 ảnh ổn định
+import hero from "../../assets/home/home2.png";            // chỉ dùng 1 ảnh ổn định
 import profileImg from "../../assets/avatars/profile.png";
 import stickerImg from "../../assets/avatars/3d_avatar_22.png";
 
@@ -29,20 +29,20 @@ export default function Home() {
 
       {/* Khối hero 1 trang */}
       <View style={{ height: H }}>
-        {/* Nền gradient để không bao giờ trắng */}
-        <LinearGradient
-          colors={["#0B0B0B", "#141414"]}
-          style={StyleSheet.absoluteFill}
-        />
-        {/* Ảnh chính: nếu lỗi sẽ ẩn, để lộ gradient */}
+        {/* Nền gradient luôn hiển thị để không lộ khung đen/trắng */}
+        <LinearGradient colors={["#0B0B0B", "#141414"]} style={StyleSheet.absoluteFill} />
+
+        {/* Ảnh chính: thêm placeholder + tắt fade để không nháy */}
         {!imgFailed && (
           <Image
             source={hero}
             style={StyleSheet.absoluteFill}
             contentFit="cover"
+            // CHỐT HẠ NHÁY ĐEN:
+            placeholder="rgba(11,11,11,1)"   // trùng màu nền -> không thấy giật
+            transition={0}                    // tắt hiệu ứng fade
+            cachePolicy="memory-disk"         // cache bền giữa các lần mở app
             priority="high"
-            cachePolicy="immutable"
-            transition={150}
             onError={() => setImgFailed(true)}
           />
         )}

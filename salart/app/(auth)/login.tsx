@@ -1,3 +1,4 @@
+// app/(auth)/login.tsx  (hoặc đúng đường dẫn file Login của bạn)
 import { Link, router } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
@@ -11,10 +12,8 @@ import {
   View,
 } from "react-native";
 import * as SecureStore from "expo-secure-store";
+import { Image as ExpoImage } from "expo-image";          // << THÊM: dùng để prefetch ảnh
 import { supabase } from "../../lib/supabase";
-// Nếu bạn vẫn muốn check onboarding ở login, có thể import hasOnboarded,
-// nhưng khuyến nghị để root gate quyết định.
-// import { hasOnboarded } from "../../lib/onboarding";
 
 const colors = {
   bg: "#121212",
@@ -30,6 +29,21 @@ const colors = {
 const SS_EMAIL_KEY = "login_email";
 const SS_PASS_KEY = "login_pass";
 
+/** ====== KHAI BÁO DANH SÁCH ẢNH HOME CẦN PRELOAD ======
+ * Điền đúng các URL ảnh hero/banner mà màn Home đang dùng
+ * (VD: ảnh từ Supabase Storage hoặc CDN). Có thể để rỗng nếu chưa có.
+ */
+const HOME_IMAGES: string[] = [
+  // "https://.../storage/v1/object/public/hero/hero1.jpg",
+  // "https://.../storage/v1/object/public/hero/hero2.jpg",
+];
+
+/** Prefetch ảnh Home (không throw lỗi để không chặn đăng nhập) */
+async function preloadHomeAssets() {
+  if (!HOME_IMAGES.length) return;
+  await Promise.allSettled(HOME_IMAGES.map((u) => ExpoImage.prefetch(u)));
+}
+
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
@@ -37,7 +51,6 @@ export default function LoginScreen() {
   const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // Nạp thông tin đã lưu (nếu có)
   useEffect(() => {
     (async () => {
       try {
@@ -87,7 +100,7 @@ export default function LoginScreen() {
         return Alert.alert("Đăng nhập thất bại", error.message);
       }
 
-      // Lưu / xoá ghi nhớ đăng nhập
+      // Lưu/clear ghi nhớ tài khoản
       try {
         if (remember) {
           await SecureStore.setItemAsync(SS_EMAIL_KEY, e);
@@ -98,8 +111,12 @@ export default function LoginScreen() {
         }
       } catch {}
 
-      // ✅ Về Home trong (tabs). Root gate sẽ tự xử lý onboarding nếu bạn đã cấu hình.
+      // ==== QUAN TRỌNG: Preload ảnh Home trước khi điều hướng ====
+      await preloadHomeAssets();
+
+      // Điều hướng sang root (RootLayout sẽ route tiếp tùy phase)
       router.replace("/");
+
     } catch (err: any) {
       Alert.alert("Lỗi không xác định", err?.message ?? "Vui lòng thử lại.");
     } finally {
@@ -114,10 +131,7 @@ export default function LoginScreen() {
     }
     try {
       setBusy(true);
-      const { error } = await supabase.auth.resetPasswordForEmail(e, {
-        // với Supabase, cần cấu hình redirectTo trong Auth settings của project
-        // redirectTo: "yourapp://reset-callback"
-      });
+      const { error } = await supabase.auth.resetPasswordForEmail(e);
       if (error) return Alert.alert("Không gửi được", error.message);
       Alert.alert("Đã gửi", "Kiểm tra email của bạn để đặt lại mật khẩu.");
     } catch (err: any) {
@@ -141,7 +155,6 @@ export default function LoginScreen() {
         </View>
 
         <View style={{ gap: 14 }}>
-          {/* Email */}
           <Field>
             <Label>Email</Label>
             <TextInput
@@ -159,7 +172,6 @@ export default function LoginScreen() {
             />
           </Field>
 
-          {/* Mật khẩu + HIỆN/ẨN */}
           <Field>
             <Label>Mật khẩu</Label>
             <View style={{ position: "relative" }}>
@@ -189,7 +201,6 @@ export default function LoginScreen() {
             </View>
           </Field>
 
-          {/* Ghi nhớ đăng nhập */}
           <Pressable
             onPress={() => setRemember((v) => !v)}
             style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 2 }}
@@ -208,20 +219,12 @@ export default function LoginScreen() {
               }}
             >
               {remember ? (
-                <View
-                  style={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: 2,
-                    backgroundColor: colors.accent,
-                  }}
-                />
+                <View style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: colors.accent }} />
               ) : null}
             </View>
             <Text style={{ color: colors.sub }}>Ghi nhớ đăng nhập</Text>
           </Pressable>
 
-          {/* Quên mật khẩu */}
           <Pressable
             onPress={handleForgotPass}
             style={{ alignSelf: "flex-end", marginTop: 8 }}
@@ -233,7 +236,6 @@ export default function LoginScreen() {
           </Pressable>
         </View>
 
-        {/* Đăng nhập */}
         <Pressable
           disabled={busy}
           onPress={handleLogin}
@@ -257,13 +259,12 @@ export default function LoginScreen() {
         <View style={{ alignItems: "center", marginTop: 18 }}>
           <Text style={{ color: colors.sub }}>
             Chưa có tài khoản?{" "}
-            <Link href="/register" style={{ color: colors.accent, fontWeight: "600" }}>
+            <Link href="/signup" style={{ color: colors.accent, fontWeight: "600" }}>
               Đăng ký
             </Link>
           </Text>
         </View>
 
-        {/* Nhắc bảo mật nhỏ */}
         <Text style={{ color: colors.sub, fontSize: 11, marginTop: 12, textAlign: "center" }}>
           * Mật khẩu được lưu trong SecureStore trên thiết bị của bạn (tuỳ chọn “Ghi nhớ đăng nhập”).
         </Text>

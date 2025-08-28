@@ -1,21 +1,27 @@
 // app/_layout.tsx
 import React, { useEffect, useState } from "react";
-import { View } from "react-native";
-import { Stack, Redirect, useSegments } from "expo-router";
+import { View, Platform, StatusBar } from "react-native";
+import { Stack, Redirect, useSegments, useRootNavigationState } from "expo-router";
 import { supabase } from "../lib/supabase";
 import { hasOnboardedUserLocal } from "../lib/onboardingUser.local";
 
 type Phase = "loading" | "anon" | "needsOnb" | "authed";
+const BG = "#0B0B0B"; // hoặc kem: "#F6F2EA"
 
 export default function RootLayout() {
-  const segments = useSegments(); // ví dụ: ["(auth)","login"] | ["(tabs)","index"] | ["bill","[id]"]
+  const navState = useRootNavigationState();
+  const segments = useSegments();
   const first = (segments[0] as string | undefined) ?? undefined;
   const isGroup = !!first && first.startsWith("(");
 
   const [phase, setPhase] = useState<Phase>("loading");
 
   useEffect(() => {
-    let sub: { data?: { subscription?: { unsubscribe?: () => void } } } | undefined;
+    let sub:
+      | {
+          data?: { subscription?: { unsubscribe?: () => void } };
+        }
+      | undefined;
 
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -29,49 +35,89 @@ export default function RootLayout() {
       }
 
       sub = supabase.auth.onAuthStateChange(async (_e, s) => {
-        if (!s?.user) { setPhase("anon"); return; }
+        if (!s?.user) return setPhase("anon");
         const ok = await hasOnboardedUserLocal(s.user.id);
         setPhase(ok ? "authed" : "needsOnb");
       });
     })();
 
-    return () => {
-      try { sub?.data?.subscription?.unsubscribe?.(); } catch {}
-    };
+    return () => sub?.data?.subscription?.unsubscribe?.();
   }, []);
 
-  // ======= GATE =======
-  if (phase === "loading") {
-    // Có thể show splash ở đây nếu cần
-    return <View style={{ flex: 1, backgroundColor: "#F8F4EF" }} />;
+  // 0) Router chưa sẵn sàng hoặc đang loading → ĐỪNG render Stack (tránh flicker)
+  if (!navState?.key || phase === "loading") {
+    return (
+      <View style={{ flex: 1, backgroundColor: BG }}>
+        <StatusBar backgroundColor={BG} barStyle="light-content" />
+      </View>
+    );
   }
 
-  // CHƯA đăng nhập -> chỉ cho nhóm (onboarding) / (auth)
+  // 1) PHASE: anon → chỉ cho phép (auth), (onboarding), "auth/*", "startup"
   if (phase === "anon") {
-    if (first === "(onboarding)" || first === "(auth)") {
-      return <Stack screenOptions={{ headerShown: false }} />;
+    const allowAnon =
+      first === "(auth)" || first === "(onboarding)" || first === "auth" || first === "startup";
+
+    if (!allowAnon) {
+      // CHẶN TỪ GỐC: không render Stack, redirect ngay → không kịp thấy Home
+      return (
+        <View style={{ flex: 1, backgroundColor: BG }}>
+          <StatusBar backgroundColor={BG} barStyle="light-content" />
+          <Redirect href="/startup" />
+        </View>
+      );
     }
-    // 👉 Điều hướng theo path KHÔNG kèm group
-    return <Redirect href="/startup" />; // hoặc "/login" nếu muốn vào thẳng login
+
+    // Được phép → render Stack bình thường
+    return (
+      <View style={{ flex: 1, backgroundColor: BG, paddingTop: Platform.OS === "android" ? 0 : 0 }}>
+        <StatusBar backgroundColor={BG} barStyle="light-content" />
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: BG }, animation: "fade" }} />
+      </View>
+    );
   }
 
-  // ĐÃ đăng nhập nhưng CHƯA onboard
+  // 2) PHASE: needsOnb → chỉ cho (onboarding)
   if (phase === "needsOnb") {
-    if (first === "(onboarding)") {
-      return <Stack screenOptions={{ headerShown: false }} />;
+    if (first !== "(onboarding)") {
+      return (
+        <View style={{ flex: 1, backgroundColor: BG }}>
+          <StatusBar backgroundColor={BG} barStyle="light-content" />
+          <Redirect href="/onboarding" />
+        </View>
+      );
     }
-    return <Redirect href="/onboarding" />; // KHÔNG kèm "(onboarding)"
+    return (
+      <View style={{ flex: 1, backgroundColor: BG }}>
+        <StatusBar backgroundColor={BG} barStyle="light-content" />
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: BG }, animation: "fade" }} />
+      </View>
+    );
   }
 
-  // ĐÃ đăng nhập & ĐÃ onboard
+  // 3) PHASE: authed → cho (tabs) hoặc route không group (e.g., /pay/123)
   if (phase === "authed") {
-    // Cho phép (tabs) và mọi route KHÔNG thuộc group (vd. /bill/[id], /pay/[id])
     if (first === "(tabs)" || !isGroup) {
-      return <Stack screenOptions={{ headerShown: false }} />;
+      return (
+        <View style={{ flex: 1, backgroundColor: BG }}>
+          <StatusBar backgroundColor={BG} barStyle="light-content" />
+          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: BG }, animation: "fade" }} />
+        </View>
+      );
     }
-    // Vào nhầm các group khác (như (auth)) -> ép về trang chủ (index trong (tabs))
-    return <Redirect href="/" />;
+    return (
+      <View style={{ flex: 1, backgroundColor: BG }}>
+        <StatusBar backgroundColor={BG} barStyle="light-content" />
+        <Redirect href="/" />
+      </View>
+    );
   }
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  // fallback
+  return (
+    <View style={{ flex: 1, backgroundColor: BG }}>
+      <StatusBar backgroundColor={BG} barStyle="light-content" />
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: BG }, animation: "fade" }} />
+    </View>
+  );
 }

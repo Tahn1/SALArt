@@ -1,3 +1,4 @@
+// app/(auth)/signup.tsx
 import { Link } from "expo-router";
 import * as Linking from "expo-linking";
 import React, { useMemo, useState } from "react";
@@ -35,10 +36,9 @@ export default function SignUpScreen() {
   const [pass, setPass] = useState("");
   const [pass2, setPass2] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false); // đã gửi mail xác nhận
 
-  // ✅ trạng thái đã gửi mail xác nhận
-  const [sent, setSent] = useState(false);
-
+  // ===== Helpers DOB =====
   function formatDobDigits(input: string) {
     const digits = input.replace(/\D/g, "").slice(0, 8);
     const mm = digits.slice(0, 2);
@@ -48,7 +48,6 @@ export default function SignUpScreen() {
     if (digits.length <= 4) return `${mm}/${dd}`;
     return `${mm}/${dd}/${yyyy}`;
   }
-
   function parseDob(str: string): Date | null {
     const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(str);
     if (!m) return null;
@@ -64,7 +63,6 @@ export default function SignUpScreen() {
     if (d.getTime() > today.getTime()) return null;
     return d;
   }
-
   const dobISO = useMemo(() => {
     const d = parseDob(dobText);
     return d ? d.toISOString() : null;
@@ -82,15 +80,18 @@ export default function SignUpScreen() {
   }
 
   async function handleSignUp() {
+    if (busy) return; // chặn double-tap
     const err = validate();
     if (err) return Alert.alert("Thiếu thông tin", err);
 
     try {
       setBusy(true);
-      // ĐƯỜNG DẪN CALLBACK (không cần group trong path)
-      const redirectTo = Linking.createURL("/auth/callback"); // ví dụ: salart://auth/callback
-      const { error } = await supabase.auth.signUp({
-        email: email.trim(),
+
+      // Tạo deep link callback: salart://auth/callback (scheme phải khai báo trong app.json)
+      const redirectTo = Linking.createURL("/auth/callback");
+
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
         password: pass,
         options: {
           data: { firstName, lastName, gender, dob: dobISO },
@@ -103,7 +104,13 @@ export default function SignUpScreen() {
         return;
       }
 
-      // ❌ Đừng điều hướng về /login ở đây
+      // ❗KHÔNG điều hướng thủ công ở đây.
+      // Nếu tắt Confirm Email trong Supabase → data.session tồn tại → gate ở app/_layout.tsx sẽ đưa bạn vào app.
+      // Nếu bật Confirm Email → không có session → hiển thị màn "đã gửi email".
+      if (data?.session) {
+        // Không cần navigate; root gate sẽ tự chuyển nhờ session có sẵn.
+        return;
+      }
       setSent(true);
     } catch (e: any) {
       Alert.alert("Lỗi không xác định", e?.message ?? "Vui lòng thử lại.");
@@ -112,7 +119,7 @@ export default function SignUpScreen() {
     }
   }
 
-  // ====== UI khi đã gửi email xác nhận ======
+  // ===== UI: đã gửi email xác nhận =====
   if (sent) {
     return (
       <View style={{ flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -145,6 +152,7 @@ export default function SignUpScreen() {
     );
   }
 
+  // ===== UI: form đăng ký =====
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: colors.bg }}
@@ -157,11 +165,23 @@ export default function SignUpScreen() {
         </View>
 
         <Field label="Họ">
-          <TextInput value={lastName} onChangeText={setLastName} placeholder="Nguyễn" placeholderTextColor="#6B7280" style={inputStyle} />
+          <TextInput
+            value={lastName}
+            onChangeText={setLastName}
+            placeholder="Nguyễn"
+            placeholderTextColor="#6B7280"
+            style={inputStyle}
+          />
         </Field>
 
         <Field label="Tên">
-          <TextInput value={firstName} onChangeText={setFirstName} placeholder="An" placeholderTextColor="#6B7280" style={inputStyle} />
+          <TextInput
+            value={firstName}
+            onChangeText={setFirstName}
+            placeholder="An"
+            placeholderTextColor="#6B7280"
+            style={inputStyle}
+          />
         </Field>
 
         <View style={{ marginTop: 12 }}>
@@ -182,20 +202,46 @@ export default function SignUpScreen() {
             maxLength={10}
             style={inputStyle}
           />
-          {!!dobText && !dobISO && <Text style={{ color: "#F87171", marginTop: 6, fontSize: 12 }}>Ngày sinh không hợp lệ.</Text>}
+          {!!dobText && !dobISO && (
+            <Text style={{ color: "#F87171", marginTop: 6, fontSize: 12 }}>
+              Ngày sinh không hợp lệ.
+            </Text>
+          )}
         </Field>
 
         <Field label="Email">
-          <TextInput value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none"
-            placeholder="you@example.com" placeholderTextColor="#6B7280" style={inputStyle} />
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="you@example.com"
+            placeholderTextColor="#6B7280"
+            style={inputStyle}
+          />
         </Field>
 
         <Field label="Mật khẩu">
-          <TextInput value={pass} onChangeText={setPass} secureTextEntry placeholder="••••••••" placeholderTextColor="#6B7280" style={inputStyle} />
+          <TextInput
+            value={pass}
+            onChangeText={setPass}
+            secureTextEntry
+            placeholder="••••••••"
+            placeholderTextColor="#6B7280"
+            style={inputStyle}
+          />
         </Field>
 
         <Field label="Nhập lại mật khẩu">
-          <TextInput value={pass2} onChangeText={setPass2} secureTextEntry placeholder="••••••••" placeholderTextColor="#6B7280" style={inputStyle} />
+          <TextInput
+            value={pass2}
+            onChangeText={setPass2}
+            secureTextEntry
+            placeholder="••••••••"
+            placeholderTextColor="#6B7280"
+            style={inputStyle}
+          />
         </Field>
 
         <Pressable
@@ -221,7 +267,9 @@ export default function SignUpScreen() {
         <View style={{ alignItems: "center", marginTop: 16 }}>
           <Text style={{ color: colors.sub }}>
             Đã có tài khoản?{" "}
-            <Link href="/login" style={{ color: colors.accent, fontWeight: "600" }}>Đăng nhập</Link>
+            <Link href="/login" style={{ color: colors.accent, fontWeight: "600" }}>
+              Đăng nhập
+            </Link>
           </Text>
         </View>
       </ScrollView>
@@ -232,18 +280,59 @@ export default function SignUpScreen() {
 /* ----------------- Components ----------------- */
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <View style={{ backgroundColor: colors.card, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginTop: 12, borderWidth: 1, borderColor: colors.border }}>
+    <View
+      style={{
+        backgroundColor: colors.card,
+        borderRadius: 14,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        marginTop: 12,
+        borderWidth: 1,
+        borderColor: colors.border,
+      }}
+    >
       <Text style={{ color: colors.sub, marginBottom: 6 }}>{label}</Text>
       {children}
     </View>
   );
 }
 
-function Radio({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+function Radio({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
   return (
-    <Pressable onPress={onPress} android_ripple={{ color: "#333", borderless: true }} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-      <View style={{ width: 20, height: 20, borderRadius: 999, borderWidth: 2, borderColor: selected ? "#E6E6E6" : colors.border, alignItems: "center", justifyContent: "center" }}>
-        {selected ? <View style={{ width: 10, height: 10, borderRadius: 999, backgroundColor: "#E6E6E6" }} /> : null}
+    <Pressable
+      onPress={onPress}
+      android_ripple={{ color: "#333", borderless: true }}
+      style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+    >
+      <View
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: 999,
+          borderWidth: 2,
+          borderColor: selected ? "#E6E6E6" : colors.border,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {selected ? (
+          <View
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 999,
+              backgroundColor: "#E6E6E6",
+            }}
+          />
+        ) : null}
       </View>
       <Text style={{ color: colors.text, fontSize: 16 }}>{label}</Text>
     </Pressable>
