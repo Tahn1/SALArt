@@ -26,10 +26,10 @@ type OrderRow = {
   order_code?: string | null;
   status_norm?: "paid" | "pending" | "canceled" | "other" | null;
   payment_method?: string | null;
-  payment_method_norm?: "cod" | "online" | "other" | null;
+  payment_method_norm?: "cod" | "online" | "bank" | "other" | null;
   created_at?: string | null;
   paid_at?: string | null;
-  note?: any | null;
+  total_vnd?: number | null; // ✅ dùng total_vnd từ view
 };
 
 type OrderItemRow = {
@@ -44,12 +44,6 @@ type OrderItemRow = {
   addons_text?: string | null;
 };
 
-function parseNote(n: any){ if(!n) return {}; if(typeof n==="string"){ try{return JSON.parse(n);}catch{return{}} } return n; }
-function totalFromNote(note:any){
-  const o = parseNote(note);
-  const v = Number([o?.GRAND_TOTAL,o?.grand_total,o?.TOTAL,o?.total].find((x:any)=>x!=null));
-  return Number.isFinite(v) && v>0 ? v : 0;
-}
 function statusLabel(s?:string|null){
   const v = String(s||"");
   if (v==="paid") return "ĐÃ THANH TOÁN";
@@ -98,15 +92,16 @@ export default function ProfileScreen() {
 
     let q = supabase
       .from("v_orders_history")
-      .select("id, user_id, order_code, status_norm, payment_method, payment_method_norm, created_at, paid_at, note")
+      // ❌ bỏ 'note', ✅ thêm total_vnd
+      .select("id, user_id, order_code, status_norm, payment_method, payment_method_norm, created_at, paid_at, total_vnd")
       .eq("user_id", uid)
       .order("id", { ascending: false })
       .range(from, to);
 
     // lọc theo tab
     if (tab === "paid") {
-      // đã thanh toán online hoặc COD đã ghi nhận paid_at
-      q = q.or("status_norm.eq.paid,and(payment_method_norm.eq.cod,paid_at.not.is.null)");
+      // đã thanh toán (bao gồm COD sau khi xác nhận)
+      q = q.eq("status_norm", "paid");
     }
     if (tab === "canceled") q = q.eq("status_norm", "canceled");
     if (tab === "cod") q = q.eq("payment_method_norm", "cod");
@@ -126,8 +121,9 @@ export default function ProfileScreen() {
 
     if (orders.length) {
       const orderIds = orders.map(o => o.id);
+      // 🔁 Nếu DB bạn vẫn là 'order_items', đổi "order_lines" -> "order_items"
       const { data: rowsItems, error: errItems } = await supabase
-        .from("order_items")
+        .from("order_lines")
         .select("*")
         .in("order_id", orderIds);
 
@@ -208,7 +204,6 @@ export default function ProfileScreen() {
     </View>
   );
 
-  // ====== NEW: Thanh Tabs ======
   const TabsBar = () => (
     <View style={{ backgroundColor: C.panel, borderBottomWidth: 1, borderColor: C.line }}>
       <ScrollView
@@ -247,7 +242,7 @@ export default function ProfileScreen() {
 
   const OrderCard = ({ item }: { item: OrderRow }) => {
     const code = item.order_code || `SAL_${String(item.id).padStart(6, "0")}`;
-    const total = totalFromNote(item.note);
+    const total = Number(item.total_vnd ?? 0); // ✅ lấy từ view
     const when = item.paid_at || item.created_at || null;
 
     const isCod = item.payment_method_norm === "cod";
@@ -356,7 +351,7 @@ export default function ProfileScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <HeaderBar />
-      <TabsBar />{/* ⬅️ thanh tab đã trở lại */}
+      <TabsBar />
 
       <SectionList
         sections={sections as any}
