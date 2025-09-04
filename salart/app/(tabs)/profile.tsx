@@ -29,7 +29,7 @@ type OrderRow = {
   payment_method_norm?: "cod" | "online" | "bank" | "other" | null;
   created_at?: string | null;
   paid_at?: string | null;
-  total_vnd?: number | null; // ✅ dùng total_vnd từ view
+  total_vnd?: number | null; // lấy total_vnd từ view
 };
 
 type OrderItemRow = {
@@ -79,7 +79,6 @@ export default function ProfileScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [confirmingId, setConfirmingId] = useState<number|null>(null);
   const PAGE = 20;
 
   const load = useCallback(async (reset=false) => {
@@ -92,7 +91,7 @@ export default function ProfileScreen() {
 
     let q = supabase
       .from("v_orders_history")
-      // ❌ bỏ 'note', ✅ thêm total_vnd
+      // dùng total_vnd từ view, không cần note
       .select("id, user_id, order_code, status_norm, payment_method, payment_method_norm, created_at, paid_at, total_vnd")
       .eq("user_id", uid)
       .order("id", { ascending: false })
@@ -100,7 +99,6 @@ export default function ProfileScreen() {
 
     // lọc theo tab
     if (tab === "paid") {
-      // đã thanh toán (bao gồm COD sau khi xác nhận)
       q = q.eq("status_norm", "paid");
     }
     if (tab === "canceled") q = q.eq("status_norm", "canceled");
@@ -121,7 +119,7 @@ export default function ProfileScreen() {
 
     if (orders.length) {
       const orderIds = orders.map(o => o.id);
-      // 🔁 Nếu DB bạn vẫn là 'order_items', đổi "order_lines" -> "order_items"
+      // Nếu DB bạn là 'order_items', đổi tên bảng cho đúng
       const { data: rowsItems, error: errItems } = await supabase
         .from("order_lines")
         .select("*")
@@ -160,27 +158,6 @@ export default function ProfileScreen() {
       Alert.alert("Đăng xuất thất bại", String(e?.message ?? e));
     }
   };
-
-  const confirmCOD = useCallback((orderId: number) => {
-    Alert.alert("Xác nhận COD", "Bạn đã nhận đủ tiền COD cho đơn này?", [
-      { text: "Hủy", style: "cancel" },
-      {
-        text: "Xác nhận", style: "destructive",
-        onPress: async () => {
-          try {
-            setConfirmingId(orderId);
-            const { error } = await supabase.rpc("confirm_cod_payment", { p_order_id: orderId, p_note: null });
-            setConfirmingId(null);
-            if (error) return Alert.alert("Không xác nhận được", error.message);
-            await onRefresh();
-          } catch (e:any) {
-            setConfirmingId(null);
-            Alert.alert("Lỗi", String(e?.message ?? e));
-          }
-        }
-      }
-    ]);
-  }, [onRefresh]);
 
   // nhóm theo ngày
   const sections = useMemo(() => {
@@ -242,15 +219,11 @@ export default function ProfileScreen() {
 
   const OrderCard = ({ item }: { item: OrderRow }) => {
     const code = item.order_code || `SAL_${String(item.id).padStart(6, "0")}`;
-    const total = Number(item.total_vnd ?? 0); // ✅ lấy từ view
+    const total = Number(item.total_vnd ?? 0);
     const when = item.paid_at || item.created_at || null;
 
-    const isCod = item.payment_method_norm === "cod";
-    const viewStatus = item.status_norm ?? "other";
-    const finalStatus: "paid" | "pending" | "canceled" | "other" =
-      (isCod && viewStatus !== "canceled" && !item.paid_at) ? "pending" :
-      (isCod && !!item.paid_at) ? "paid" :
-      (viewStatus as any);
+    // Với COD auto-paid, không cần xử lý riêng. Dùng trực tiếp status_norm.
+    const finalStatus = (item.status_norm ?? "other") as "paid" | "pending" | "canceled" | "other";
 
     const pill =
       finalStatus === "paid"
@@ -261,7 +234,6 @@ export default function ProfileScreen() {
         ? { bg: "#fef3c7", bd: "#fde68a", tx: "#92400e" }
         : { bg: "#e5e7eb", bd: "#d1d5db", tx: "#374151" };
 
-    const showConfirm = isCod && finalStatus === "pending";
     const its = itemsByOrder[item.id] || [];
 
     const compact = its.map(it => ({
@@ -318,24 +290,7 @@ export default function ProfileScreen() {
 
         <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
           <Text style={{ color: C.sub, fontSize: 12 }}>Chạm để xem chi tiết hóa đơn</Text>
-
-          {showConfirm && (
-            <Pressable
-              onPress={(e:any) => { e?.stopPropagation?.(); confirmCOD(item.id); }}
-              disabled={confirmingId === item.id}
-              style={{
-                backgroundColor: C.dark,
-                paddingVertical: 10,
-                paddingHorizontal: 12,
-                borderRadius: 10,
-                opacity: confirmingId === item.id ? 0.7 : 1,
-              }}
-            >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>
-                {confirmingId === item.id ? "ĐANG XÁC NHẬN..." : "XÁC NHẬN ĐÃ THU COD"}
-              </Text>
-            </Pressable>
-          )}
+          {/* ĐÃ BỎ nút xác nhận COD */}
         </View>
       </Pressable>
     );

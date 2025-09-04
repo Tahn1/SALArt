@@ -65,7 +65,7 @@ function normalizeFromOrderLine(row:any, dishMap:Map<number, any>){
   return { id: row?.id, order_id: row?.order_id, dish_id: row?.dish_id ?? snap?.dish_id ?? null, name, qty, line_total_vnd, addons_text };
 }
 
-// chuẩn hoá khi chỉ có items từ param `its` (không đủ addons -> ít nhất tính được giá món × qty)
+// chuẩn hoá khi chỉ có items từ param `its`
 function normalizeFromParam(it:any, dishMap:Map<number, any>){
   const qty = qtyOf(it);
   const dish = dishMap.get(Number(it?.dish_id)) || {};
@@ -94,17 +94,51 @@ export default function BillScreen(){
 
   const [lines, setLines] = useState<any[]>([]);
   const [dbNote, setDbNote] = useState<any|null>(null);
+  const [orderCode, setOrderCode] = useState<string|null>(null);
   const [loading, setLoading] = useState(false);
 
-  // fetch orders.note + order_lines + dishes (lấy giá)
+  // Cho phép rời màn khi chính ta điều hướng (ví dụ bấm "Về Trang chủ")
+  const allowLeaveRef = useRef(false);
+
+  // Ẩn icon back + tắt gesture + chặn back cứng/gesture
+  useEffect(() => {
+    navigation.setOptions?.({
+      headerBackVisible: false,
+      headerLeft: () => null,
+      gestureEnabled: false,
+    } as any);
+
+    // chặn back cứng Android
+    const backSub = BackHandler.addEventListener("hardwareBackPress", () => true);
+
+    // chặn pop từ header/gesture; cho phép nếu mình bật cờ
+    const unsub = navigation.addListener("beforeRemove", (e: any) => {
+      if (allowLeaveRef.current) return;
+      e.preventDefault();
+    });
+
+    return () => {
+      try { backSub.remove(); } catch {}
+      try { (unsub as any)(); } catch {}
+    };
+  }, [navigation]);
+
+  // fetch orders.note + order_lines + dishes (lấy giá) + order_code
   useEffect(() => {
     if (!Number.isFinite(orderId) || snap) return; // đi từ giỏ có snapshot thì khỏi fetch DB
     let alive = true;
     setLoading(true);
     (async () => {
       try {
-        const { data: ord } = await supabase.from("orders").select("id, note").eq("id", orderId).maybeSingle();
-        if (alive) setDbNote(ord?.note ?? null);
+        const { data: ord } = await supabase
+          .from("orders")
+          .select("id, note, order_code")
+          .eq("id", orderId)
+          .maybeSingle();
+        if (alive) {
+          setDbNote(ord?.note ?? null);
+          setOrderCode(ord?.order_code ?? null);
+        }
 
         const { data: ol } = await supabase
           .from("order_lines")
@@ -129,7 +163,7 @@ export default function BillScreen(){
         let dishMap = new Map<number, any>();
         if (dishIds.length){
           const { data: dishes } = await supabase
-            .from("dishes") // bảng bạn cung cấp
+            .from("dishes")
             .select("id, name, price_vnd")
             .in("id", dishIds);
           dishMap = new Map((dishes ?? []).map((d:any)=>[Number(d.id), d]));
@@ -148,7 +182,7 @@ export default function BillScreen(){
     return () => { alive = false; };
   }, [orderId, snap, itemsFromProfile]);
 
-  // cleanup
+  // cleanup khi bấm CTA
   const cleanedRef = useRef(false);
   const cleanupPointers = async () => {
     if (cleanedRef.current) return;
@@ -158,11 +192,6 @@ export default function BillScreen(){
     try { await AsyncStorage.removeItem(ORDER_KEY); } catch {}
     setTimeout(()=>{ cleanedRef.current = false; }, 1000);
   };
-  useEffect(() => {
-    const unsub = navigation.addListener("beforeRemove", () => { cleanupPointers(); });
-    const backSub = BackHandler.addEventListener("hardwareBackPress", () => { cleanupPointers(); return false; });
-    return () => { try { (unsub as any)(); } catch {} try { backSub.remove(); } catch {} };
-  }, [navigation]);
 
   // realtime payment_status
   const [payStatus, setPayStatus] = useState<string>("unpaid");
@@ -211,12 +240,44 @@ export default function BillScreen(){
     snap ? pos(snap?.grandTotal)
          : firstPos(meta?.grandTotal, noteObj?.GRAND_TOTAL, noteObj?.grand_total, (subTotal + shippingFee + vat));
 
-  const goHome = async () => { await cleanupPointers(); router.replace("/"); };
-  const goCart = async () => { await cleanupPointers(); router.replace("/(tabs)/cart"); };
+  // ==== Mã đơn hiển thị (đồng bộ với lịch sử) ====
+  const displayCode = useMemo(() => {
+    // Ưu tiên dữ liệu truyền kèm/snapshot/meta/note, rồi đến DB orderCode; cuối cùng fallback SAL_ + id
+    const fromParams =
+      (snap && (snap as any)?.order_code) ||
+      (meta && (meta as any)?.order_code) ||
+      (noteObj && ((noteObj as any)?.order_code || (noteObj as any)?.ORDER_CODE)) ||
+      null;
+
+    return (
+      (fromParams ? String(fromParams) : null) ||
+      (orderCode ? String(orderCode) : null) ||
+      (Number.isFinite(orderId) ? `SAL_${String(orderId).padStart(6, "0")}` : null)
+    );
+  }, [snap, meta, noteObj, orderCode, orderId]);
+
+  // Cho phép rời màn khi bấm CTA này
+  const goHome = async () => {
+    allowLeaveRef.current = true;
+    await cleanupPointers();
+    router.replace("/");
+    setTimeout(() => { allowLeaveRef.current = false; }, 500);
+  };
 
   return (
     <View style={{ flex:1, backgroundColor:C.bg }}>
-      <Stack.Screen options={{ headerShown:true, title: params?.id ? `Hóa đơn #${params.id}` : "Hóa đơn", headerShadowVisible:false, headerStyle:{ backgroundColor: C.panel }, headerTitleStyle:{ fontWeight:"800" } }} />
+      <Stack.Screen
+        options={{
+          headerShown:true,
+          title: displayCode ? `Hóa đơn ${displayCode}` : (params?.id ? `Hóa đơn #${params.id}` : "Hóa đơn"),
+          headerShadowVisible:false,
+          headerStyle:{ backgroundColor: C.panel },
+          headerTitleStyle:{ fontWeight:"800" },
+          headerBackVisible:false,  // ẩn icon back
+          headerLeft: () => null,   // không render back
+          gestureEnabled:false,     // tắt gesture back iOS
+        }}
+      />
       <ScrollView contentContainerStyle={{ padding:16, paddingBottom:24 }}>
 
         {paidLike ? (
@@ -225,7 +286,9 @@ export default function BillScreen(){
               <Ionicons name="checkmark" size={56} color={C.ok} />
             </View>
             <Text style={{ marginTop:14, fontSize:22, fontWeight:"900", color:C.text }}>ĐÃ THANH TOÁN</Text>
-            <Text style={{ marginTop:6, color:C.sub, textAlign:"center" }}>Cảm ơn bạn! Đơn hàng #{params.id} đã được ghi nhận.</Text>
+            <Text style={{ marginTop:6, color:C.sub, textAlign:"center" }}>
+              Cảm ơn bạn! Đơn hàng {displayCode ? displayCode : `#${params.id}`} đã được ghi nhận.
+            </Text>
           </View>
         ) : (
           <View style={{ marginBottom:12 }}>
@@ -237,7 +300,7 @@ export default function BillScreen(){
           </View>
         )}
 
-        {/* Thông tin nhận hàng — bỏ giờ */}
+        {/* Thông tin nhận hàng */}
         <View style={{ backgroundColor:C.panel, borderWidth:1, borderColor:C.line, borderRadius:12, padding:14, marginBottom:12, gap:6 }}>
           <Text style={{ color:C.text, fontWeight:"700" }}>
             {method==="delivery" ? "Giao đến" : "Nhận tại quầy"}
@@ -336,10 +399,8 @@ export default function BillScreen(){
             style={{ backgroundColor:C.ok, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
             <Text style={{ color:"#fff", fontWeight:"800" }}>Về Trang chủ</Text>
           </Pressable>
-          <Pressable onPress={goCart}
-            style={{ backgroundColor:"#fff", borderWidth:1, borderColor:C.line, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
-            <Text style={{ color:C.text, fontWeight:"800" }}>Xem giỏ hàng</Text>
-          </Pressable>
+
+          {/* ĐÃ BỎ nút "Xem giỏ hàng" */}
         </View>
       </ScrollView>
     </View>
