@@ -9,7 +9,7 @@ import { Image } from "expo-image";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { FlashList } from "@shopify/flash-list";
-import { router } from "expo-router"; // điều hướng sang chi tiết
+import { router } from "expo-router";
 
 type Dish = {
   id: number;
@@ -32,57 +32,31 @@ const IMAGE_BUCKET = "dishes";
 const FALLBACK =
   "https://images.unsplash.com/photo-1551218808-94e220e084d2?q=80&w=1200&auto=format&fit=crop";
 
-// ==== Kích thước ảnh mục tiêu (mượt + “mờ nhẹ”) ====
 const SCREEN_W   = Dimensions.get("window").width;
-const CARD_W     = SCREEN_W - 24;         // marginHorizontal: 12 x 2
-const IMG_W      = CARD_W - PAD * 2;      // paddingHorizontal trong vùng ảnh
-const DPR        = Math.min(2, PixelRatio.get()); // 2x là đủ đẹp
-const SCALE_DOWN = 0.72;                  // xin ảnh nhỏ hơn -> upsample nhẹ => mờ mờ, đỡ lag
-const LQIP_W     = 24;                    // placeholder siêu nhỏ để hiện ngay
+const CARD_W     = SCREEN_W - 24;
+const IMG_W      = CARD_W - PAD * 2;
+const DPR        = Math.min(2, PixelRatio.get());
+const SCALE_DOWN = 0.72;
+const LQIP_W     = 24;
 
-// ======= CHỈNH PHẦN ẢNH (QUAN TRỌNG) =======
-// Nhận diện URL public/signed Supabase cho bucket hiện tại
 const SUPA_PUBLIC_RE = new RegExp(`^https?://[^?]+/storage/v1/object/public/${IMAGE_BUCKET}/`, "i");
 const SUPA_SIGN_RE   = new RegExp(`^https?://[^?]+/storage/v1/object/sign/${IMAGE_BUCKET}/`, "i");
-
-// Chuẩn hoá giá trị DB -> key trong bucket
 function toBucketKey(p?: string | null) {
   let key = String(p || "").trim();
   if (!key) return "";
-
-  // Nếu là URL Supabase thì cắt prefix để lấy key
   key = key.replace(SUPA_PUBLIC_RE, "").replace(SUPA_SIGN_RE, "");
-  // Bỏ "/" đầu
   key = key.replace(/^\/+/, "");
-
-  // Nếu chỉ là tên file (không có "/") -> mặc định nằm trong thư mục "dishes/"
   if (!key.includes("/")) key = `dishes/${key}`;
-
-  // Nếu lỡ lặp "dishes/dishes/..." -> gom lại thành "dishes/..."
   key = key.replace(/^dishes\/(?:dishes\/)+/i, "dishes/");
-
   return key;
 }
-
-// Helpers build URL — LUÔN dùng key trong bucket
-function buildUrl(
-  path: string,
-  opts: { w: number; q: number; resize: "cover" | "contain"; webp?: boolean }
-) {
+function buildUrl(path: string, opts: { w: number; q: number; resize: "cover" | "contain"; webp?: boolean }) {
   const key = toBucketKey(path);
   if (!key) return FALLBACK;
-
   return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(key, {
-    transform: {
-      width: opts.w,
-      quality: opts.q,
-      resize: opts.resize,
-      ...(opts.webp ? { format: "webp" as const } : {}),
-    },
+    transform: { width: opts.w, quality: opts.q, resize: opts.resize, ...(opts.webp ? { format: "webp" as const } : {}) },
   }).data.publicUrl;
 }
-
-// 👉 ĐỔI sang "contain" để không bị crop
 function urlMainWebp(path?: string | null) {
   if (!path) return FALLBACK;
   const targetW = Math.max(420, Math.round(IMG_W * DPR * SCALE_DOWN));
@@ -97,7 +71,6 @@ function urlTiny(path?: string | null, webp = true) {
   if (!path) return FALLBACK;
   return buildUrl(path, { w: LQIP_W, q: 20, resize: "contain", webp });
 }
-
 function fmt1(x?: number | null) {
   if (x == null) return null;
   const n = Number(x);
@@ -105,9 +78,7 @@ function fmt1(x?: number | null) {
   return Math.abs(n - Math.round(n)) < 1e-9 ? String(Math.round(n)) : n.toFixed(1);
 }
 
-// ======= Swap tiện dụng: đổi vị trí 2 và 3 theo yêu cầu =======
-const SWAP_PAIR_IDX: [number, number] = [1, 2]; // 0-based: vị trí thứ 2 và 3
-
+const SWAP_PAIR_IDX: [number, number] = [1, 2];
 function swapByIndex<T>(arr: T[], [i, j]: [number, number]) {
   if (i < 0 || j < 0 || i >= arr.length || j >= arr.length) return arr;
   const next = arr.slice();
@@ -119,15 +90,13 @@ export default function MenuScreen() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<(typeof CHIP_ITEMS)[number]>("Nổi bật");
   const [query, setQuery] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState(""); // debounce 250ms
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [items, setItems] = useState<Dish[]>([]);
 
   const insets = useSafeAreaInsets();
   const tabH = useBottomTabBarHeight();
   const TAB_PLATE_BASE = 110;
-  const bottomSpace = Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16;
 
-  // debounce tìm kiếm
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(query.trim().toLowerCase()), 250);
     return () => clearTimeout(t);
@@ -137,22 +106,17 @@ export default function MenuScreen() {
     try {
       setLoading(true);
 
-      // 1) dishes (ưu tiên display_order), 2) ingredients
+      // 1) dishes
       let dishes: any[] = [];
       const colsWithOrder = "id,name,image_path,display_order";
       const colsFallback  = "id,name,image_path";
-
       const d1 = await supabase
         .from("dishes")
         .select(colsWithOrder)
         .order("display_order", { ascending: true, nullsFirst: false })
         .order("id", { ascending: true });
-
       if (d1.error && (d1.error.message || "").toLowerCase().includes("display_order")) {
-        const d2 = await supabase
-          .from("dishes")
-          .select(colsFallback)
-          .order("id", { ascending: true });
+        const d2 = await supabase.from("dishes").select(colsFallback).order("id", { ascending: true });
         if (d2.error) throw d2.error;
         dishes = d2.data ?? [];
       } else if (d1.error) {
@@ -161,30 +125,60 @@ export default function MenuScreen() {
         dishes = d1.data ?? [];
       }
 
+      // 2) Thành phần (lấy ingredient_id để join config)
       const ingRes = await supabase
         .from("dish_ingredients")
-        .select("dish_id, category, ingredients:ingredients_nutrition(name)")
+        .select(`
+          dish_id,
+          ingredient_id,
+          category,
+          ingredients:ingredients_nutrition(
+            name,
+            kcal_100g,
+            protein_g_100g,
+            fat_g_100g,
+            carbs_g_100g
+          )
+        `)
         .order("dish_id");
-
       if (ingRes.error) throw ingRes.error;
 
-      const ing = ingRes.data ?? [];
-
-      // nhóm base/topping
+      // a) nhóm tên base/topping
       const grouped: Record<number, { base: string[]; topping: string[] }> = {};
-      for (const row of ing as any[]) {
-        const id = row.dish_id as number;
-        const name = row.ingredients?.name as string | undefined;
-        if (!name) continue;
-        if (!grouped[id]) grouped[id] = { base: [], topping: [] };
-        (row.category === "base" ? grouped[id].base : grouped[id].topping).push(name);
+      // b) map dinh dưỡng 100g theo ingredient
+      const nutri100ByIng: Record<number, { kcal:number; protein:number; fat:number; carbs:number }> = {};
+      // c) map dish -> danh sách ingredient_id (không base), đã khử trùng lặp
+      const nonBaseByDish: Record<number, number[]> = {};
+
+      for (const row of (ingRes.data ?? []) as any[]) {
+        const dishId = Number(row.dish_id);
+        const ingId  = Number(row.ingredient_id);
+        const name   = row.ingredients?.name as string | undefined;
+        const cat    = String(row.category ?? "").toLowerCase();
+
+        if (name) {
+          if (!grouped[dishId]) grouped[dishId] = { base: [], topping: [] };
+          (cat === "base" ? grouped[dishId].base : grouped[dishId].topping).push(name);
+        }
+
+        nutri100ByIng[ingId] = {
+          kcal:    Number(row.ingredients?.kcal_100g      ?? 0),
+          protein: Number(row.ingredients?.protein_g_100g ?? 0),
+          fat:     Number(row.ingredients?.fat_g_100g     ?? 0),
+          carbs:   Number(row.ingredients?.carbs_g_100g   ?? 0),
+        };
+
+        if (cat !== "base") {
+          if (!nonBaseByDish[dishId]) nonBaseByDish[dishId] = [];
+          if (!nonBaseByDish[dishId].includes(ingId)) nonBaseByDish[dishId].push(ingId);
+        }
       }
       for (const g of Object.values(grouped)) {
         g.base = Array.from(new Set(g.base));
         g.topping = Array.from(new Set(g.topping));
       }
 
-      // 3) dinh dưỡng mặc định
+      // 3) dinh dưỡng "base" từ dish_nutrition_default — cộng dồn theo dish_id
       const ids = dishes.map((d: any) => d.id);
       const nutriMap: Record<number, {kcal:number;protein:number;fat:number;carbs:number;serving_size_g:number}> = {};
       if (ids.length) {
@@ -193,17 +187,71 @@ export default function MenuScreen() {
           .select("dish_id,kcal,protein,fat,carbs,serving_size_g")
           .in("dish_id", ids);
         if (defsRes.error) throw defsRes.error;
+
         for (const r of defsRes.data ?? []) {
-          nutriMap[r.dish_id] = {
-            kcal: Number(r.kcal ?? 0),
-            protein: Number(r.protein ?? 0),
-            fat: Number(r.fat ?? 0),
-            carbs: Number(r.carbs ?? 0),
-            serving_size_g: Number(r.serving_size_g ?? 0),
-          };
+          const cur = nutriMap[r.dish_id] ?? { kcal:0, protein:0, fat:0, carbs:0, serving_size_g:0 };
+          cur.kcal           += Number(r.kcal ?? 0);
+          cur.protein        += Number(r.protein ?? 0);
+          cur.fat            += Number(r.fat ?? 0);
+          cur.carbs          += Number(r.carbs ?? 0);
+          cur.serving_size_g += Number(r.serving_size_g ?? 0);
+          nutriMap[r.dish_id] = cur;
         }
       }
 
+      // 4) cộng thêm dinh dưỡng từ ADD-ON MẶC ĐỊNH (ingredient_addon_config.min_steps * step_g)
+      const allNonBaseIngIds = Array.from(new Set(Object.values(nonBaseByDish).flat()));
+      if (allNonBaseIngIds.length > 0) {
+        const cfgRes = await supabase
+          .from("ingredient_addon_config")
+          .select("ingredient_id, step_g, min_steps, is_active")
+          .in("ingredient_id", allNonBaseIngIds as any[])
+          .eq("is_active", true);
+
+        if (!cfgRes.error) {
+          // build map cấu hình để tra nhanh
+          const cfgByIng = new Map<number, { min:number; step:number }>();
+          for (const r of (cfgRes.data ?? [])) {
+            const ingId = Number((r as any).ingredient_id);
+            cfgByIng.set(ingId, {
+              min:  Number((r as any).min_steps ?? 0),
+              step: Number((r as any).step_g ?? 0),
+            });
+          }
+
+          for (const [dishIdStr, ingIds] of Object.entries(nonBaseByDish)) {
+            const dishId = Number(dishIdStr);
+            let add = { kcal:0, protein:0, fat:0, carbs:0, grams:0 };
+
+            for (const ingId of ingIds) {
+              const cfg = cfgByIng.get(Number(ingId));
+              if (!cfg) continue;
+              const grams = cfg.min * cfg.step;
+              if (grams <= 0) continue;
+
+              const n = nutri100ByIng[Number(ingId)] ?? { kcal:0, protein:0, fat:0, carbs:0 };
+              const f = grams / 100;
+              add.kcal    += n.kcal    * f;
+              add.protein += n.protein * f;
+              add.fat     += n.fat     * f;
+              add.carbs   += n.carbs   * f;
+              add.grams   += grams;
+            }
+
+            if (add.grams > 0) {
+              const cur = nutriMap[dishId] ?? { kcal:0, protein:0, fat:0, carbs:0, serving_size_g:0 };
+              cur.kcal           += add.kcal;
+              cur.protein        += add.protein;
+              cur.fat            += add.fat;
+              cur.carbs          += add.carbs;
+              cur.serving_size_g += add.grams;
+              nutriMap[dishId] = cur;
+            }
+          }
+        }
+      }
+
+      // 5) dữ liệu cho UI
       let next: Dish[] = dishes.map((d: any) => ({
         id: d.id,
         name: d.name,
@@ -217,14 +265,10 @@ export default function MenuScreen() {
         carbs:  nutriMap[d.id]?.carbs  ?? null,
       }));
 
-      // 👉 YÊU CẦU: đổi chỗ món vị trí 2 và 3 trong UI
-      if (next.length >= 3) {
-        next = swapByIndex(next, SWAP_PAIR_IDX);
-      }
-
+      if (next.length >= 3) next = swapByIndex(next, SWAP_PAIR_IDX);
       setItems(next);
 
-      // Prefetch 2–3 ảnh đầu: thử webp trước (contain)
+      // prefetch ảnh
       next.slice(0, 3).forEach((it) => {
         Image.prefetch(urlMainWebp(it.image_path)).catch(() => {
           Image.prefetch(urlMainFallback(it.image_path)).catch(() => {});
@@ -237,7 +281,6 @@ export default function MenuScreen() {
     }
   }, []);
 
-  // Trì hoãn load để tránh giật khung đầu phiên
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(load);
     return () => task.cancel();
@@ -245,7 +288,7 @@ export default function MenuScreen() {
 
   const filtered = useMemo(() => {
     let arr = items;
-    if (filter === "Đồ uống") arr = []; // hiện tại chưa có
+    if (filter === "Đồ uống") arr = [];
     if (!debouncedQ) return arr;
     return arr.filter((it) => it.name.toLowerCase().includes(debouncedQ));
   }, [debouncedQ, items, filter]);
@@ -255,6 +298,8 @@ export default function MenuScreen() {
     []
   );
   const keyExtractor = useCallback((it: Dish) => String(it.id), []);
+
+  const bottomSpace = Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16;
 
   if (loading && items.length === 0) {
     return (
@@ -268,11 +313,9 @@ export default function MenuScreen() {
   return (
     <SafeAreaView style={{ flex:1, backgroundColor:"#fff" }} edges={["top","left","right"]}>
       <StatusBar translucent={false} backgroundColor="#fff" barStyle="dark-content" />
-
       {/* Chips + Search */}
       <View style={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 10 }}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ gap: 8 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
           {CHIP_ITEMS.map((c) => {
             const on = filter === c;
             return (
@@ -302,8 +345,8 @@ export default function MenuScreen() {
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         estimatedItemSize={520}
-        contentContainerStyle={{ paddingHorizontal: 0, paddingBottom: Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16 }}
-        scrollIndicatorInsets={{ bottom: Math.max(tabH, TAB_PLATE_BASE + (insets.bottom || 0)) + 16 }}
+        contentContainerStyle={{ paddingHorizontal: 0, paddingBottom: bottomSpace }}
+        scrollIndicatorInsets={{ bottom: bottomSpace }}
         keyboardShouldPersistTaps="handled"
         onRefresh={load}
         refreshing={loading}
@@ -323,28 +366,23 @@ const ImgWithFallback = ({ path, recyclingKey }: { path?: string | null; recycli
     <Image
       source={{ uri: sourceUri }}
       placeholder={{ uri: tinyUri }}
-      placeholderContentFit="contain"   // không crop placeholder
+      placeholderContentFit="contain"
       style={{ width: "100%", aspectRatio: 4/3, borderRadius: 14 }}
-      contentFit="contain"              // 👈 không cắt ảnh, thấy trọn cái bát
+      contentFit="contain"
       transition={120}
       priority="low"
       cachePolicy="immutable"
       recyclingKey={recyclingKey}
-      onError={() => setUseWebp(false)} // nếu webp lỗi -> fallback
+      onError={() => setUseWebp(false)}
     />
   );
 };
 
-// Card bấm để mở chi tiết
 const MenuCard = memo(function MenuCard({ item }: { item: Dish }) {
   const openDetail = () => {
     router.push({
       pathname: "/menu/[id]",
-      params: {
-        id: String(item.id),
-        name: item.name,
-        image: urlMainWebp(item.image_path), // truyền sẵn URL ảnh đã transform
-      },
+      params: { id: String(item.id), name: item.name, image: urlMainWebp(item.image_path) },
     });
   };
 
@@ -356,7 +394,6 @@ const MenuCard = memo(function MenuCard({ item }: { item: Dish }) {
         borderWidth: 1, borderColor: "#e5e7eb", backgroundColor: BG,
       }}
     >
-      {/* Text block */}
       <View style={{ padding: PAD }}>
         <View style={{ flexDirection:"row", alignItems:"center", justifyContent:"space-between" }}>
           <Text style={{ color: "#6b7280", fontWeight:"700", fontSize: FONT.brand }}>Saladays</Text>
@@ -388,12 +425,10 @@ const MenuCard = memo(function MenuCard({ item }: { item: Dish }) {
         )}
       </View>
 
-      {/* Ảnh */}
       <View style={{ backgroundColor: BG, paddingHorizontal: PAD, paddingBottom: 12 }}>
         <ImgWithFallback path={item.image_path} recyclingKey={String(item.id)} />
       </View>
 
-      {/* Pills dinh dưỡng */}
       <View style={{ marginTop: 6, marginBottom: 12, alignSelf: "center", flexDirection: "row", gap: 8 }}>
         {typeof item.serving_size_g === "number" && item.serving_size_g > 0 && (
           <Pill label={`${Math.round(item.serving_size_g)}g`} />

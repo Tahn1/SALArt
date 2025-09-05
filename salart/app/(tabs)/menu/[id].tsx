@@ -206,8 +206,6 @@ export default function DishDetail() {
     [items, dishId]
   );
 
-  const FOOTER_H = 96 + insets.bottom;
-
   // Lấy tồn kho món từ v_dish_available
   useEffect(() => {
     let alive = true;
@@ -274,20 +272,29 @@ export default function DishDetail() {
         if (!alive) return;
         setDish(d);
 
-        // 2) dinh dưỡng base 1 suất
+        // 2) dinh dưỡng base 1 suất -> LẤY TẤT CẢ & CỘNG DỒN
         const nutRes = await supabase
           .from("dish_nutrition_default")
           .select("kcal,protein,fat,carbs,serving_size_g")
-          .eq("dish_id", dishId)
-          .limit(1);
+          .eq("dish_id", dishId); // không .limit(1)
+
         if (!nutRes.error) {
-          const nut = nutRes.data?.[0] ?? null;
-          if (alive && nut) setDish((prev) => (prev ? { ...prev, ...nut } : prev));
+          const arr = nutRes.data ?? [];
+          const totals = arr.reduce(
+            (s: any, r: any) => ({
+              kcal:           s.kcal           + n0(r.kcal),
+              protein:        s.protein        + n0(r.protein),
+              fat:            s.fat            + n0(r.fat),
+              carbs:          s.carbs          + n0(r.carbs),
+              serving_size_g: s.serving_size_g + n0(r.serving_size_g),
+            }),
+            { kcal: 0, protein: 0, fat: 0, carbs: 0, serving_size_g: 0 }
+          );
+          if (alive) setDish((prev) => (prev ? { ...prev, ...totals } : prev));
         }
 
         // 3) danh sách add-on
         let tops: Topping[] = [];
-
         tops = await fetchAddonsFromConfig(dishId);
 
         if (tops.length === 0) {
@@ -374,21 +381,16 @@ export default function DishDetail() {
             return (t.avail_steps ?? 0) >= minSteps;
           });
 
-          if (alive) {
-            setToppings(filtered);
-            setCounts(Object.fromEntries(filtered.map(t => [t.id, Math.max(0, t.min_steps ?? 0)])));
-          }
+          setToppings(filtered);
+          setCounts(Object.fromEntries(filtered.map(t => [t.id, Math.max(0, t.min_steps ?? 0)])));
         } else {
-          if (alive) {
-            setToppings([]);
-            setCounts({});
-          }
+          setToppings([]);
+          setCounts({});
         }
-
       } catch (err: any) {
         Alert.alert("Lỗi", err?.message ?? "Không tải được dữ liệu món");
       } finally {
-        if (alive) setLoading(false);
+        setLoading(false);
       }
     })();
     return () => { alive = false; };
@@ -418,11 +420,26 @@ export default function DishDetail() {
     [toppings, counts]
   );
 
+  // 🔢 THÊM: tổng gram & tổng dinh dưỡng để hiển thị
+  const addedGrams = useMemo(
+    () => toppings.reduce((sum, t) => sum + (counts[t.id] || 0) * (t.amount_per_unit_g || 0), 0),
+    [toppings, counts]
+  );
+  const baseGrams = n0(dish?.serving_size_g);
+  const totalGrams = baseGrams + addedGrams;
+
+  const baseNutri = useMemo(() => ({
+    kcal:    n0(dish?.kcal),
+    protein: n0(dish?.protein),
+    fat:     n0(dish?.fat),
+    carbs:   n0(dish?.carbs),
+  }), [dish]);
+
   const totalNutriPerDish = {
-    kcal:    n0(dish?.kcal)    + addedNutri.kcal,
-    protein: n0(dish?.protein) + addedNutri.protein,
-    fat:     n0(dish?.fat)     + addedNutri.fat,
-    carbs:   n0(dish?.carbs)   + addedNutri.carbs,
+    kcal:    baseNutri.kcal    + addedNutri.kcal,
+    protein: baseNutri.protein + addedNutri.protein,
+    fat:     baseNutri.fat     + addedNutri.fat,
+    carbs:   baseNutri.carbs   + addedNutri.carbs,
   };
 
   // ===== Disable điều kiện =====
@@ -431,22 +448,28 @@ export default function DishDetail() {
   const dishOut = dishOutByMode || dishOutByView;
 
   // 🔒 chặn vượt khi đã có sẵn trong giỏ
-  const leftForCart = dishAvail == null ? null : Math.max(0, Number(dishAvail) - inCartQtyForDish);
-  const overByCart  = dishAvail != null && leftForCart <= 0;
+  // ❌ bỏ 2 dòng khai báo lại useCart() và inCartQtyForDish
 
-  const addonsAllUnavailable = hadAddonSlots && toppings.length === 0;
-  const addDisabled = dishOut || addonsAllUnavailable || overByCart;
+// Dùng lại inCartQtyForDish đã tính ở trên
+const leftForCart: number | null =
+  dishAvail == null ? null : Math.max(0, Number(dishAvail) - inCartQtyForDish);
 
-  const incTop = (tid: string | number, max?: number | null) =>
-    setCounts(prev => {
-      const t = toppings.find(x => String(x.id) === String(tid));
-      const cur = prev[tid] || 0;
-      const hardMax = max ?? 99;
-      const stockMax = t?.avail_steps ?? 0;
-      const practicalMax = Math.min(hardMax, stockMax);
-      if (addDisabled || cur >= practicalMax) return prev;
-      return { ...prev, [tid]: cur + 1 };
-    });
+const overByCart = dishAvail != null && leftForCart <= 0;
+
+const addonsAllUnavailable = hadAddonSlots && toppings.length === 0;
+const addDisabled = dishOut || addonsAllUnavailable || overByCart;
+
+const incTop = (tid: string | number, max?: number | null) =>
+  setCounts(prev => {
+    const t = toppings.find(x => String(x.id) === String(tid));
+    const cur = prev[tid] || 0;
+    const hardMax = max ?? 99;
+    const stockMax = t?.avail_steps ?? 0;
+    const practicalMax = Math.min(hardMax, stockMax);
+    if (addDisabled || cur >= practicalMax) return prev;
+    return { ...prev, [tid]: cur + 1 };
+  });
+
 
   const decTop = (tid: string | number, min?: number | null) =>
     setCounts(prev => {
@@ -495,13 +518,14 @@ export default function DishDetail() {
         base_price_vnd: basePrice,
         qty: 1,
         addons,
+        // gửi tổng dinh dưỡng & tổng gram (base + addon)
         kcal: totalNutriPerDish.kcal,
         protein: totalNutriPerDish.protein,
         fat: totalNutriPerDish.fat,
         carbs: totalNutriPerDish.carbs,
-        serving_size_g: dish.serving_size_g ?? null,
+        serving_size_g: (dish?.serving_size_g != null ? totalGrams : null),
         no_merge: true,
-      }, true); // verifyWithServer = true
+      }, true);
 
       if (!ok) {
         Alert.alert("Không thể thêm", "Món này không còn đủ suất.");
@@ -619,8 +643,6 @@ export default function DishDetail() {
                           +{fmtVND(t.extra_price_vnd)}
                           {t.amount_per_unit_g ? ` · ~${round1(t.amount_per_unit_g)}g` : ""}
                           <> · {round1(t.kcal_pu)} kcal, {round1(t.carbs_pu)}g C, {round1(t.fat_pu)}g F, {round1(t.protein_pu)}g P</>
-                          {t.max_steps != null ? ` · tối đa ${t.max_steps} bước` : ""}
-                          {t.avail_steps != null ? ` · còn ~${t.avail_steps} bước` : ""}
                         </Text>
                       </View>
 
@@ -680,6 +702,37 @@ export default function DishDetail() {
           borderTopWidth: 1, borderColor: C.line,
         }}
       >
+        {/* 📊 Tổng dinh dưỡng */}
+        <View
+          style={{
+            marginBottom: 10,
+            padding: 10,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: C.line,
+            backgroundColor: "#FBF7F0",
+          }}
+        >
+          <Text style={{ color: C.text, fontWeight: "700", marginBottom: 4 }}>
+            Tổng dinh dưỡng
+          </Text>
+
+          <Text style={{ color: C.sub, fontSize: 12 }}>
+            Gốc: {Math.round(baseGrams)}g · {Math.round(baseNutri.kcal)} kcal ·
+            {" "}C {round1(baseNutri.carbs)}g · F {round1(baseNutri.fat)}g · P {round1(baseNutri.protein)}g
+          </Text>
+
+          <Text style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>
+            Add-on: +{Math.round(addedGrams)}g · +{round1(addedNutri.kcal)} kcal ·
+            {" "}+C {round1(addedNutri.carbs)}g · +F {round1(addedNutri.fat)}g · +P {round1(addedNutri.protein)}g
+          </Text>
+
+          <Text style={{ color: C.text, fontWeight: "800", marginTop: 4 }}>
+            Tổng: {Math.round(totalGrams)}g · {Math.round(totalNutriPerDish.kcal)} kcal ·
+            {" "}C {round1(totalNutriPerDish.carbs)}g · F {round1(totalNutriPerDish.fat)}g · P {round1(totalNutriPerDish.protein)}g
+          </Text>
+        </View>
+
         {/* 🔕 chỉ hiện “Trong giỏ: X” */}
         {inCartQtyForDish > 0 && (
           <Text style={{ color: C.sub, marginBottom: 6 }}>
