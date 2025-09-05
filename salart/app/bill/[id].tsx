@@ -94,13 +94,12 @@ export default function BillScreen(){
 
   const [lines, setLines] = useState<any[]>([]);
   const [dbNote, setDbNote] = useState<any|null>(null);
-  const [orderCode, setOrderCode] = useState<string|null>(null);
   const [loading, setLoading] = useState(false);
 
   // Cho phép rời màn khi chính ta điều hướng (ví dụ bấm "Về Trang chủ")
   const allowLeaveRef = useRef(false);
 
-  // Ẩn icon back + tắt gesture + chặn back cứng/gesture
+  // chặn back/gesture
   useEffect(() => {
     navigation.setOptions?.({
       headerBackVisible: false,
@@ -108,10 +107,7 @@ export default function BillScreen(){
       gestureEnabled: false,
     } as any);
 
-    // chặn back cứng Android
     const backSub = BackHandler.addEventListener("hardwareBackPress", () => true);
-
-    // chặn pop từ header/gesture; cho phép nếu mình bật cờ
     const unsub = navigation.addListener("beforeRemove", (e: any) => {
       if (allowLeaveRef.current) return;
       e.preventDefault();
@@ -123,7 +119,18 @@ export default function BillScreen(){
     };
   }, [navigation]);
 
-  // fetch orders.note + order_lines + dishes (lấy giá) + order_code
+  // ---- cleanup pointers (đơn đang chờ) ----
+  const cleanedRef = useRef(false);
+  const cleanupPointers = async () => {
+    if (cleanedRef.current) return;
+    cleanedRef.current = true;
+    try { await cancelActiveOrderIfAny(); } catch {}
+    try { await clearActiveOrder(); } catch {}
+    try { await AsyncStorage.removeItem(ORDER_KEY); } catch {}
+    setTimeout(()=>{ cleanedRef.current = false; }, 1000);
+  };
+
+  // fetch orders.note + order_lines + dishes (lấy giá)
   useEffect(() => {
     if (!Number.isFinite(orderId) || snap) return; // đi từ giỏ có snapshot thì khỏi fetch DB
     let alive = true;
@@ -132,13 +139,10 @@ export default function BillScreen(){
       try {
         const { data: ord } = await supabase
           .from("orders")
-          .select("id, note, order_code")
+          .select("id, note")
           .eq("id", orderId)
           .maybeSingle();
-        if (alive) {
-          setDbNote(ord?.note ?? null);
-          setOrderCode(ord?.order_code ?? null);
-        }
+        if (alive) setDbNote(ord?.note ?? null);
 
         const { data: ol } = await supabase
           .from("order_lines")
@@ -148,7 +152,7 @@ export default function BillScreen(){
 
         const raw = ol ?? [];
 
-        // gom dish_id từ order_lines → nếu rỗng thì lấy từ param its → nếu vẫn rỗng thử note.items
+        // gom dish_id
         const noteObj = parseNoteAny(ord?.note);
         const noteItems = Array.isArray(noteObj?.items) ? noteObj.items : (Array.isArray(noteObj?.cart?.items) ? noteObj.cart.items : []);
         const dishIds = [...new Set(
@@ -169,7 +173,6 @@ export default function BillScreen(){
           dishMap = new Map((dishes ?? []).map((d:any)=>[Number(d.id), d]));
         }
 
-        // ưu tiên order_lines; nếu rỗng, dùng itemsFromProfile với giá từ dishes
         const normalized = raw.length
           ? raw.map((r:any)=> normalizeFromOrderLine(r, dishMap))
           : (Array.isArray(itemsFromProfile) ? itemsFromProfile.map((i:any)=> normalizeFromParam(i, dishMap)) : []);
@@ -181,17 +184,6 @@ export default function BillScreen(){
     })();
     return () => { alive = false; };
   }, [orderId, snap, itemsFromProfile]);
-
-  // cleanup khi bấm CTA
-  const cleanedRef = useRef(false);
-  const cleanupPointers = async () => {
-    if (cleanedRef.current) return;
-    cleanedRef.current = true;
-    try { await cancelActiveOrderIfAny(); } catch {}
-    try { await clearActiveOrder(); } catch {}
-    try { await AsyncStorage.removeItem(ORDER_KEY); } catch {}
-    setTimeout(()=>{ cleanedRef.current = false; }, 1000);
-  };
 
   // realtime payment_status
   const [payStatus, setPayStatus] = useState<string>("unpaid");
@@ -212,14 +204,20 @@ export default function BillScreen(){
   const paidLike    = payStatus === "paid" || payStatus === "paid_demo";
   const pendingLike = payStatus === "pending_confirm";
 
+  // ✅ Khi đã thanh toán → tự dọn con trỏ (tránh quay về đơn cũ)
+  useEffect(() => {
+    if (paidLike) cleanupPointers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paidLike]);
+
   // ===== dữ liệu hiển thị =====
   const noteObj = useMemo(()=> parseNoteAny(dbNote), [dbNote]);
   const method  = snap?.method  ?? meta?.method  ?? noteObj?.method;
   const address = snap?.address ?? meta?.address ?? noteObj?.address ?? noteObj?.ADDRESS;
   const store   = snap?.store   ?? meta?.store   ?? noteObj?.store;
 
-  const promotions = Array.isArray(snap?.promotions) ? snap!.promotions
-                     : Array.isArray(meta?.promotions) ? meta!.promotions : [];
+  const promotions = Array.isArray(snap?.promotions) ? snap.promotions
+                     : Array.isArray(meta?.promotions) ? meta.promotions : [];
 
   const subTotalFromLines = (lines ?? []).reduce((s:number,it:any)=> s + pos(it.line_total_vnd), 0);
   const subTotal =
@@ -227,11 +225,14 @@ export default function BillScreen(){
          : (subTotalFromLines > 0 ? subTotalFromLines :
             pos(noteObj?.SUBTOTAL ?? noteObj?.sub_total ?? noteObj?.subtotal));
 
+  // 🔧 FIX: bỏ dấu ngoặc thừa
   const shippingFee =
     snap ? pos(snap?.shippingFee)
          : pos(meta?.shippingFee ?? noteObj?.SHIPPING_FEE ?? noteObj?.shipping_fee ?? noteObj?.ship_fee);
 
+  // 🔧 FIX: không xuống dòng trước ?? để tránh lỗi syntax
   const vatRate = Number(snap?.VAT_RATE ?? meta?.VAT_RATE ?? noteObj?.VAT_RATE ?? 0.08);
+
   const vat =
     snap ? pos(snap?.vat)
          : pos(noteObj?.VAT_AMOUNT ?? Math.round((subTotal + shippingFee) * vatRate));
@@ -240,21 +241,11 @@ export default function BillScreen(){
     snap ? pos(snap?.grandTotal)
          : firstPos(meta?.grandTotal, noteObj?.GRAND_TOTAL, noteObj?.grand_total, (subTotal + shippingFee + vat));
 
-  // ==== Mã đơn hiển thị (đồng bộ với lịch sử) ====
+  // ==== Mã đơn hiển thị: CHỈ dựa vào params.id ====
   const displayCode = useMemo(() => {
-    // Ưu tiên dữ liệu truyền kèm/snapshot/meta/note, rồi đến DB orderCode; cuối cùng fallback SAL_ + id
-    const fromParams =
-      (snap && (snap as any)?.order_code) ||
-      (meta && (meta as any)?.order_code) ||
-      (noteObj && ((noteObj as any)?.order_code || (noteObj as any)?.ORDER_CODE)) ||
-      null;
-
-    return (
-      (fromParams ? String(fromParams) : null) ||
-      (orderCode ? String(orderCode) : null) ||
-      (Number.isFinite(orderId) ? `SAL_${String(orderId).padStart(6, "0")}` : null)
-    );
-  }, [snap, meta, noteObj, orderCode, orderId]);
+    const idNum = Number(params?.id);
+    return Number.isFinite(idNum) ? `SAL_${String(idNum).padStart(6, "0")}` : "";
+  }, [params?.id]);
 
   // Cho phép rời màn khi bấm CTA này
   const goHome = async () => {
@@ -273,9 +264,9 @@ export default function BillScreen(){
           headerShadowVisible:false,
           headerStyle:{ backgroundColor: C.panel },
           headerTitleStyle:{ fontWeight:"800" },
-          headerBackVisible:false,  // ẩn icon back
-          headerLeft: () => null,   // không render back
-          gestureEnabled:false,     // tắt gesture back iOS
+          headerBackVisible:false,
+          headerLeft: () => null,
+          gestureEnabled:false,
         }}
       />
       <ScrollView contentContainerStyle={{ padding:16, paddingBottom:24 }}>
@@ -287,7 +278,7 @@ export default function BillScreen(){
             </View>
             <Text style={{ marginTop:14, fontSize:22, fontWeight:"900", color:C.text }}>ĐÃ THANH TOÁN</Text>
             <Text style={{ marginTop:6, color:C.sub, textAlign:"center" }}>
-              Cảm ơn bạn! Đơn hàng {displayCode ? displayCode : `#${params.id}`} đã được ghi nhận.
+              Cảm ơn bạn! Đơn hàng {displayCode || `#${params.id}`} đã được ghi nhận.
             </Text>
           </View>
         ) : (
@@ -399,8 +390,6 @@ export default function BillScreen(){
             style={{ backgroundColor:C.ok, paddingVertical:14, borderRadius:14, alignItems:"center" }}>
             <Text style={{ color:"#fff", fontWeight:"800" }}>Về Trang chủ</Text>
           </Pressable>
-
-          {/* ĐÃ BỎ nút "Xem giỏ hàng" */}
         </View>
       </ScrollView>
     </View>

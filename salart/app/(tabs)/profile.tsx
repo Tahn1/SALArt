@@ -23,13 +23,13 @@ type TabKey = typeof TABS[number]["key"];
 type OrderRow = {
   id: number;
   user_id?: string | null;
-  order_code?: string | null;
+  // order_code?: string | null;  // ❌ Không dùng nữa để tránh lệch
   status_norm?: "paid" | "pending" | "canceled" | "other" | null;
   payment_method?: string | null;
   payment_method_norm?: "cod" | "online" | "bank" | "other" | null;
   created_at?: string | null;
   paid_at?: string | null;
-  total_vnd?: number | null; // lấy total_vnd từ view
+  total_vnd?: number | null;
 };
 
 type OrderItemRow = {
@@ -44,16 +44,19 @@ type OrderItemRow = {
   addons_text?: string | null;
 };
 
-function statusLabel(s?:string|null){
+const statusLabel = (s?:string|null) => {
   const v = String(s||"");
   if (v==="paid") return "ĐÃ THANH TOÁN";
   if (v==="pending") return "ĐANG THU";
   if (v==="canceled") return "ĐÃ HỦY";
   if (v==="other") return "KHÁC";
   return v.toUpperCase();
-}
+};
 const itemName = (it: OrderItemRow) => it.dish_name ?? it.name ?? (it.dish_id ? `Món #${it.dish_id}` : "Món");
 const itemQty  = (it: OrderItemRow) => (typeof it.qty === "number" ? it.qty : it.quantity) ?? 1;
+
+// ✅ Hiển thị mã đơn LUÔN từ orders.id
+const displayCodeFromId = (id: number) => `SAL_${String(id).padStart(6, "0")}`;
 
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
@@ -89,20 +92,17 @@ export default function ProfileScreen() {
 
     setLoading(true);
 
+    // ❗ Không lấy order_code nữa để tránh phụ thuộc dữ liệu cũ
     let q = supabase
       .from("v_orders_history")
-      // dùng total_vnd từ view, không cần note
-      .select("id, user_id, order_code, status_norm, payment_method, payment_method_norm, created_at, paid_at, total_vnd")
+      .select("id, user_id, status_norm, payment_method, payment_method_norm, created_at, paid_at, total_vnd")
       .eq("user_id", uid)
       .order("id", { ascending: false })
       .range(from, to);
 
-    // lọc theo tab
-    if (tab === "paid") {
-      q = q.eq("status_norm", "paid");
-    }
-    if (tab === "canceled") q = q.eq("status_norm", "canceled");
-    if (tab === "cod") q = q.eq("payment_method_norm", "cod");
+    if (tab === "paid")      q = q.eq("status_norm", "paid");
+    if (tab === "canceled")  q = q.eq("status_norm", "canceled");
+    if (tab === "cod")       q = q.eq("payment_method_norm", "cod");
 
     const { data, error } = await q;
 
@@ -119,19 +119,20 @@ export default function ProfileScreen() {
 
     if (orders.length) {
       const orderIds = orders.map(o => o.id);
-      // Nếu DB bạn là 'order_items', đổi tên bảng cho đúng
       const { data: rowsItems, error: errItems } = await supabase
         .from("order_lines")
         .select("*")
         .in("order_id", orderIds);
 
       if (!errItems) {
-        const next: Record<number, OrderItemRow[]> = reset ? {} : { ...itemsByOrder };
-        for (const it of (rowsItems ?? []) as OrderItemRow[]) {
-          (next[it.order_id] ||= []).push(it);
-        }
-        Object.values(next).forEach(arr => arr.sort((a,b)=> (a.id||0)-(b.id||0)));
-        setItemsByOrder(next);
+        setItemsByOrder(prev => {
+          const next: Record<number, OrderItemRow[]> = reset ? {} : { ...prev };
+          for (const it of (rowsItems ?? []) as OrderItemRow[]) {
+            (next[it.order_id] ||= []).push(it);
+          }
+          Object.values(next).forEach(arr => arr.sort((a,b)=> (a.id||0)-(b.id||0)));
+          return next;
+        });
       } else {
         console.warn(errItems);
       }
@@ -139,7 +140,6 @@ export default function ProfileScreen() {
 
     setLoading(false);
     if (reset) setPage(0);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, tab, page]);
 
   useEffect(()=>{ setItems([]); setItemsByOrder({}); setHasMore(true); setPage(0); load(true); }, [tab, session?.user?.id]);
@@ -218,11 +218,10 @@ export default function ProfileScreen() {
   );
 
   const OrderCard = ({ item }: { item: OrderRow }) => {
-    const code = item.order_code || `SAL_${String(item.id).padStart(6, "0")}`;
+    const oid = item.id;                              // ✅ nguồn sự thật
+    const code = displayCodeFromId(oid);              // ✅ SAL_xxxxxx từ id
     const total = Number(item.total_vnd ?? 0);
     const when = item.paid_at || item.created_at || null;
-
-    // Với COD auto-paid, không cần xử lý riêng. Dùng trực tiếp status_norm.
     const finalStatus = (item.status_norm ?? "other") as "paid" | "pending" | "canceled" | "other";
 
     const pill =
@@ -234,8 +233,7 @@ export default function ProfileScreen() {
         ? { bg: "#fef3c7", bd: "#fde68a", tx: "#92400e" }
         : { bg: "#e5e7eb", bd: "#d1d5db", tx: "#374151" };
 
-    const its = itemsByOrder[item.id] || [];
-
+    const its = itemsByOrder[oid] || [];
     const compact = its.map(it => ({
       id: it.id,
       dish_id: it.dish_id,
@@ -249,12 +247,12 @@ export default function ProfileScreen() {
 
     return (
       <Pressable
-        onPress={() => router.push({ pathname: "/bill/[id]", params: { id: String(item.id), its: itsParam } })}
+        onPress={() => router.push({ pathname: "/bill/[id]", params: { id: String(oid), its: itsParam } })}
         android_ripple={{ color: "#eee" }}
         style={{ padding: 14, marginHorizontal: 16, marginTop: 8, backgroundColor: "#fff", borderRadius: 12, borderWidth: 1, borderColor: C.line }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ fontWeight: "800", color: C.text }}>#{code}</Text>
+          <Text style={{ fontWeight: "800", color: C.text }}>{code}</Text>
           <View style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: pill.bg, borderWidth: 1, borderColor: pill.bd }}>
             <Text style={{ fontSize: 12, fontWeight: "800", color: pill.tx }}>{statusLabel(finalStatus)}</Text>
           </View>
@@ -290,7 +288,6 @@ export default function ProfileScreen() {
 
         <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
           <Text style={{ color: C.sub, fontSize: 12 }}>Chạm để xem chi tiết hóa đơn</Text>
-          {/* ĐÃ BỎ nút xác nhận COD */}
         </View>
       </Pressable>
     );

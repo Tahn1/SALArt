@@ -17,7 +17,6 @@ const EXPIRE_MS = 15 * 60 * 1000;
 
 type TOrder = {
   id: number;
-  order_code?: string | null;
   payment_status?: string | null;
   payment_method?: string | null;
   note?: any | null;
@@ -130,32 +129,21 @@ export default function PayScreen(){
     })();
   }, [orderId]);
 
-  // ==== lấy đơn + đảm bảo order_code
+  // ==== lấy đơn (không đọc/ghi order_code)
   useEffect(()=>{
     if (!Number.isFinite(orderId)) return;
     (async ()=>{
       const { data, error } = await supabase
         .from("orders")
-        .select("id, order_code, payment_status, payment_method, note")
+        .select("id, payment_status, payment_method, note")
         .eq("id", orderId)
-        .maybeSingle<TOrder>();
+        .maybeSingle();
       if (error) { console.warn(error); return; }
-      let row = data || null;
+      const row = (data as TOrder) || null;
 
       if (!row) {
         Alert.alert("Không tìm thấy đơn hàng", "Vui lòng quay lại giỏ hàng để tạo đơn mới.");
         return;
-      }
-
-      if (!row.order_code) {
-        const gen = `SAL_${String(orderId).padStart(6,"0")}`;
-        const { data: upd, error: eUpd } = await supabase
-          .from("orders")
-          .update({ order_code: gen })
-          .eq("id", orderId)
-          .select("id, order_code, payment_status, payment_method, note")
-          .maybeSingle<TOrder>();
-        if (!eUpd && upd) row = upd;
       }
 
       if (row?.payment_status === "paid" || row?.payment_status === "paid_demo") {
@@ -168,11 +156,11 @@ export default function PayScreen(){
     })();
   }, [orderId, goBill]);
 
-  // order_code hiển thị
-  const orderCode = useMemo(()=>{
-    if (dbOrder?.order_code) return dbOrder.order_code;
-    return `SAL_${String(Number.isFinite(orderId) ? orderId : "").padStart(6,"0")}`;
-  }, [dbOrder, orderId]);
+  // MÃ ĐƠN hiển thị: luôn SAL_{orderId}
+  const orderCode = useMemo(
+    () => `SAL_${String(orderId).padStart(6, "0")}`,
+    [orderId]
+  );
 
   // tổng từ note
   const noteObj = useMemo(()=> parseNote(dbOrder?.note), [dbOrder]);
@@ -195,7 +183,8 @@ export default function PayScreen(){
     return 0;
   }, [rawAmount, noteTotal, storedAmount]);
 
-  const [tab, setTab] = useState<"bank"|"cod">("bank");
+  // 🔧 Mặc định mở tab COD để không tự tạo PayOS
+  const [tab, setTab] = useState<"bank"|"cod">("cod");
   const [saving, setSaving] = useState(false);
   const [loadingQR, setLoadingQR] = useState(false);
   const [canceling, setCanceling] = useState(false);
@@ -461,8 +450,9 @@ export default function PayScreen(){
     }
   }
 
-  // Khi total>0 và CHƯA có cache/QR → tự tạo QR
+  // 🔒 Chỉ tự tạo QR khi đang ở tab "bank"
   useEffect(() => {
+    if (tab !== "bank") return;
     if (!Number.isFinite(orderId)) return;
     if (navigated.current) return;
     if (payStatus === "paid" || payStatus === "paid_demo") return;
@@ -472,7 +462,43 @@ export default function PayScreen(){
       qrRequested.current = true;
       createPayQR(false);
     }
-  }, [orderId, total, payStatus]);
+  }, [orderId, total, payStatus, tab]);
+
+  // ✅ Nếu chuyển SANG COD: hạ PayOS pending → failed, xoá QR cache, reset đơn về unpaid
+  useEffect(() => {
+    if (tab !== "cod") return;
+    (async () => {
+      try {
+        // đóng pending PayOS
+        await supabase
+          .from("payments")
+          .update({ status: "failed" })
+          .eq("order_id", orderId)
+          .eq("gateway", "payos")
+          .in("status", ["pending"]);
+
+        // reset đơn về unpaid nếu đang chờ xác nhận ngân hàng
+        await supabase
+          .from("orders")
+          .update({ payment_method: null, payment_status: "unpaid" })
+          .eq("id", orderId)
+          .in("payment_status", ["pending_confirm"]);
+
+        // xoá QR/cache cục bộ
+        try { await clearActiveOrder(); } catch {}
+        setQrUrl(null);
+        setQrContent(null);
+        setExpiresAt(null);
+        setCachedQR(null);
+        setCachedExp(null);
+        setCachedEff(null);
+        setTestInfo(null);
+        qrRequested.current = false;
+      } catch (e) {
+        console.warn("soft-cancel payos when switching to COD", e);
+      }
+    })();
+  }, [tab, orderId]);
 
   // Nút: Tạo lại QR
   async function handleRecreateQR(){
@@ -496,14 +522,12 @@ export default function PayScreen(){
     if (!Number.isFinite(orderId)) return;
     setCanceling(true);
     try {
-      // Hủy đơn (chỉ khi chưa/đang chờ)
       await supabase
         .from("orders")
         .update({ payment_status: "canceled", payment_method: null })
         .eq("id", orderId)
         .in("payment_status", ["unpaid", "pending_confirm"]);
 
-      // Đổi payment pending -> failed (nếu có)
       await supabase
         .from("payments")
         .update({ status: "failed" })
@@ -528,6 +552,21 @@ export default function PayScreen(){
     if (!Number.isFinite(orderId)) { Alert.alert("Lỗi", "Không xác định được mã đơn."); return; }
     setSaving(true);
     try{
+      // 🔻 Đóng mọi PayOS pending (bảo hiểm lần nữa)
+      await supabase
+        .from("payments")
+        .update({ status: "failed" })
+        .eq("order_id", orderId)
+        .eq("gateway", "payos")
+        .in("status", ["pending"]);
+
+      // 🧹 Dọn cache QR
+      try { await clearActiveOrder(); } catch {}
+      setQrUrl(null); setQrContent(null);
+      setExpiresAt(null); setCachedQR(null); setCachedExp(null); setCachedEff(null);
+      qrRequested.current = false;
+
+      // Tiêu hao tồn kho (nếu chưa)
       const { error: eStock } = await supabase.rpc("consume_stock_for_order", { p_order_id: orderId });
       if (eStock && !/ALREADY_CONSUMED/i.test(String(eStock.message||""))) {
         if (/OUT_OF_STOCK/i.test(String(eStock.message||""))) throw new Error("Hết nguyên liệu cho một số món. Vui lòng điều chỉnh đơn.");
@@ -535,6 +574,7 @@ export default function PayScreen(){
       }
 
       const nowIso = new Date().toISOString();
+      // Ghi payment COD đã trả
       await upsertPayment({
         method: "cod",
         status: "paid",
@@ -543,6 +583,7 @@ export default function PayScreen(){
         paid_at: nowIso
       });
 
+      // Cập nhật đơn sang COD + paid
       const { error: ePaid } = await supabase
         .from("orders")
         .update({ payment_method:"cod", payment_status:"paid", paid_at: nowIso })
@@ -599,7 +640,7 @@ export default function PayScreen(){
       <Stack.Screen
         options={{
           headerShown:true,
-          title:`Thanh toán #${orderId}`,
+          title:`Thanh toán ${orderCode}`,
           headerShadowVisible:false,
           headerStyle:{ backgroundColor:C.panel },
           headerTitleStyle:{ fontWeight:"800" }
@@ -627,7 +668,7 @@ export default function PayScreen(){
               {(expiresAt ?? cachedExp) === null
                 ? (loadingQR ? "Đang tạo mã QR…" : "Đang chờ QR từ PayOS…")
                 : expired ? "Mã QR đã hết hạn"
-                : <>Mã QR còn hiệu lực trong {mm}:{ss}</>}
+                : `Mã QR còn hiệu lực trong ${mm}:${ss}`}
             </Text>
 
             {expired && (
@@ -685,7 +726,7 @@ export default function PayScreen(){
             <View style={{ alignItems:"center", marginTop:16, padding:16, borderWidth:1, borderColor:C.line, borderRadius:12 }}>
               <Text style={{ color:C.sub }}>Số tiền</Text>
               <Text style={{ color:C.text, fontSize:28, fontWeight:"900" }}>{fmtVnd(total)}</Text>
-              <Text style={{ color:C.sub, marginTop:6 }}>Đơn hàng #{orderId}</Text>
+              <Text style={{ color:C.sub, marginTop:6 }}>Đơn hàng {orderCode}</Text>
             </View>
 
             <Pressable

@@ -8,7 +8,7 @@ import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import * as Location from "expo-location";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "../../lib/supabase";
-import { useCart, removeLine, removeAddon, setAddonQty, cancelActiveOrderIfAny } from "../../lib/cart"; // ⬅ thêm cancelActiveOrderIfAny
+import { useCart, removeLine, removeAddon, setAddonQty, cancelActiveOrderIfAny } from "../../lib/cart";
 import { STORE } from "../../lib/store";
 import { useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -310,18 +310,18 @@ export default function CartScreen(){
     if (addonIds.length === 0) { setAddonMeta({}); return; }
     setAddonMetaLoading(true);
     try{
+      // ✅ lấy trực tiếp các cột trong bảng ingredients_nutrition
       const { data, error } = await supabase
         .from("ingredients_nutrition")
-        .select("id, stock_g, ingredient_addon_config(step_g, min_steps, max_steps)")
+        .select("id, stock_g, step_g, min_steps, max_steps")
         .in("id", addonIds as any[]);
       if (error) throw error;
       const map: Record<number, AddonMeta> = {};
       (data as any[]).forEach(row=>{
-        const cfg = row.ingredient_addon_config && (Array.isArray(row.ingredient_addon_config) ? row.ingredient_addon_config[0] : row.ingredient_addon_config);
         map[row.id] = {
-          step_g: Number(cfg?.step_g ?? 10),
-          min_steps: Number(cfg?.min_steps ?? 0),
-          max_steps: cfg?.max_steps == null ? null : Number(cfg.max_steps),
+          step_g: Number(row?.step_g ?? 10),
+          min_steps: Number(row?.min_steps ?? 0),
+          max_steps: row?.max_steps == null ? null : Number(row.max_steps),
           stock_g: Number(row?.stock_g ?? 0),
         };
       });
@@ -334,12 +334,16 @@ export default function CartScreen(){
   }
   useEffect(()=>{ loadAddonMeta(); }, [addonIds.join(",")]);
 
-  // Tổng số bước add-on đã đặt trong giỏ theo ingredient
+  // Tổng số bước add-on đã đặt trong giỏ theo ingredient — ✅ NHÂN item.qty
   const reservedStepsByIng = useMemo(()=>{
     const m:Record<number,number> = {};
-    for (const it of items) for (const a of (it.addons??[])) {
-      const id = Number(a.id);
-      m[id] = (m[id] || 0) + (Number(a.qty_units) || 0);
+    for (const it of items) {
+      const mult = Math.max(1, Number(it.qty || 1));
+      for (const a of (it.addons??[])) {
+        const id = Number(a.id);
+        const used = (Number(a.qty_units) || 0) * mult;
+        m[id] = (m[id] || 0) + used;
+      }
     }
     return m;
   }, [items]);
@@ -381,7 +385,7 @@ export default function CartScreen(){
 
     if(overCapacity){ Alert.alert("Vượt công suất","Một số món vượt số suất còn lại."); return; }
 
-    // Chặn vượt kho add-on
+    // Chặn vượt kho add-on (đã tính đúng theo qty)
     for (const idStr of Object.keys(reservedStepsByIng)) {
       const id = Number(idStr);
       const meta = addonMeta[id] ?? { step_g:10, min_steps:0, max_steps:null, stock_g:0 };
@@ -462,7 +466,7 @@ export default function CartScreen(){
         subTotal,
         grandTotal,
         store: { id: STORE.id, name: STORE.name, address: STORE.address },
-        items: buildSnapshotFromCart(items), // đồng nhất format để so sánh lần sau
+        items: buildSnapshotFromCart(items),
       };
       await saveActiveOrder({ orderId, createdAt: Date.now(), snapshot: summary });
       try { await AsyncStorage.setItem(ORDER_KEY, String(orderId)); } catch {}
@@ -549,14 +553,30 @@ export default function CartScreen(){
                   <View style={{ flexDirection:"row", flexWrap:"wrap" }}>
                     {addons.map((a:any)=>{
                       const meta = addonMeta[a.id] ?? { step_g:10, min_steps:0, max_steps:null, stock_g:0 };
+
                       const totalStepsFromStock = Math.floor(Math.max(0, meta.stock_g) / Math.max(1, meta.step_g));
-                      const reservedOthers = (reservedStepsByIng[a.id] || 0) - (a.qty_units || 0);
-                      const remainingSteps = Math.max(0, totalStepsFromStock - reservedOthers);
-                      const perLineCap = meta.max_steps == null ? 99 : Math.max(0, Number(meta.max_steps));
-                      const allowUpTo = Math.min(remainingSteps, perLineCap);
-                      const canInc = (a.qty_units || 0) < allowUpTo;
-                      const remainForLine = Math.max(0, allowUpTo - (a.qty_units || 0));
-                      const showOut = (a.qty_units || 0) === 0 && remainingSteps < (meta.min_steps || 0);
+                      const lineQty = Math.max(1, Number(item.qty || 1));
+
+                      // Số bước đang dùng ở dòng hiện tại (tính đúng theo qty món)
+                      const currentLineUsed = (Number(a.qty_units) || 0) * lineQty;
+
+                      // Tổng đã dùng (toàn giỏ) TRỪ phần dòng hiện tại
+                      const reservedOthers = Math.max(0, (reservedStepsByIng[a.id] || 0) - currentLineUsed);
+
+                      // Số bước còn lại cho toàn giỏ
+                      const remainingTotal = Math.max(0, totalStepsFromStock - reservedOthers);
+
+                      // Mỗi lần bấm "+" tăng 1 bước *mỗi suất* => tốn = lineQty bước kho
+                      const perServingRoom = Math.floor(remainingTotal / lineQty);
+
+                      const perLineCap = meta.max_steps == null ? Infinity : Math.max(0, Number(meta.max_steps));
+                      const allowUpTo = Math.min(perServingRoom, perLineCap);
+
+                      const curUnits = Number(a.qty_units) || 0;
+                      const canInc = curUnits < allowUpTo;
+                      const remainForLine = Math.max(0, allowUpTo - curUnits);
+
+                      const showOut = curUnits === 0 && perServingRoom < Math.max(0, Number(meta.min_steps || 0));
 
                       return (
                         <View key={`${item.line_id}-${a.id}`} style={{ flexDirection:"row", alignItems:"center", paddingHorizontal:10, paddingVertical:6, borderRadius:999, borderWidth:1, borderColor:C.line, backgroundColor:"#fff", marginRight:6, marginBottom:6, gap:6 }}>
@@ -570,17 +590,17 @@ export default function CartScreen(){
                           </View>
 
                           <View style={{ flexDirection:"row", alignItems:"center", borderWidth:1, borderColor:C.line, borderRadius:8 }}>
-                            <Pressable onPress={()=>setAddonQty(item.line_id,a.id,Math.max(0,(a.qty_units||0)-1))} style={{ paddingHorizontal:6, paddingVertical:2 }}>
+                            <Pressable onPress={()=>setAddonQty(item.line_id,a.id,Math.max(0,curUnits-1))} style={{ paddingHorizontal:6, paddingVertical:2 }}>
                               <Text style={{ fontSize:12, fontWeight:"800", color:C.text }}>–</Text>
                             </Pressable>
                             <Text style={{ minWidth:18, textAlign:"center", fontWeight:"800", color:C.text, fontSize:12 }}>
-                              {a.qty_units || 0}
+                              {curUnits}
                             </Text>
                             <Pressable
                               disabled={!canInc}
                               onPress={()=>{
                                 if (!canInc) return;
-                                setAddonQty(item.line_id, a.id, Math.min(99, (a.qty_units||0)+1));
+                                setAddonQty(item.line_id, a.id, Math.min(99, curUnits+1));
                               }}
                               style={{ paddingHorizontal:6, paddingVertical:2, opacity: canInc ? 1 : 0.35 }}
                             >
